@@ -28,6 +28,7 @@ export interface AccessLog {
   result: 'success' | 'failed' | 'alert';
   ipAddress: string;
   deviceId?: string;
+  category: string;
 }
 
 export interface JoinRequest {
@@ -62,17 +63,77 @@ export const mockUsers: User[] = [
   { id: '4', fullName: 'Casey Kim', email: 'casey@mail.com', phone: '+1234567893', role: 'member', isPrimaryAdmin: false, status: 'blocked', houseId: 'h1', joinedAt: '2025-03-15' },
 ];
 
-export const mockLogs: AccessLog[] = Array.from({ length: 50 }, (_, i) => ({
-  id: `log-${i}`,
-  userId: mockUsers[i % 4].id,
-  userName: mockUsers[i % 4].fullName,
-  timestamp: new Date(Date.now() - i * 3600000 * Math.random() * 5).toISOString(),
-  action: ['Door Access', 'Gate Open', 'System Login', 'Config Change', 'Credential Update'][i % 5],
-  method: ['RFID', 'Fingerprint', 'Keypad', 'OTP', 'Password'][i % 5],
-  result: (['success', 'success', 'success', 'failed', 'alert'] as const)[i % 5],
-  ipAddress: `192.168.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`,
-  deviceId: i % 3 === 0 ? `DEV-${1000 + i}` : undefined,
-})).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+const unlockMethods = ['RFID', 'Fingerprint', 'Keypad', 'OTP'];
+const accountActions = ['Credential Update', 'Role Changed', 'Profile Updated', 'Status Changed'];
+const accountDetails = [
+  '',
+  'Role: member → admin',
+  'Updated phone number',
+  'Status: active → blocked',
+  '',
+  'Role: admin → member',
+  'Updated full name',
+  'Status: blocked → active',
+];
+
+function buildLogs(): AccessLog[] {
+  const logs: AccessLog[] = [];
+  let id = 0;
+
+  // Unlock logs — all use "Door Access", results include success/failed/alert
+  for (let i = 0; i < 20; i++) {
+    const userIdx = i % 4;
+    const results: Array<'success' | 'failed' | 'alert'> = ['success', 'success', 'success', 'failed', 'alert'];
+    logs.push({
+      id: `log-${id++}`,
+      userId: mockUsers[userIdx].id,
+      userName: mockUsers[userIdx].fullName,
+      timestamp: new Date(Date.now() - i * 3600000 * Math.random() * 5).toISOString(),
+      action: 'Door Access',
+      method: unlockMethods[i % unlockMethods.length],
+      result: results[i % 5],
+      ipAddress: `192.168.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`,
+      deviceId: undefined,
+      category: 'unlock',
+    });
+  }
+
+  // System logs — only "System Login", no result filter (all success)
+  for (let i = 0; i < 15; i++) {
+    const userIdx = i % 4;
+    logs.push({
+      id: `log-${id++}`,
+      userId: mockUsers[userIdx].id,
+      userName: mockUsers[userIdx].fullName,
+      timestamp: new Date(Date.now() - i * 7200000 * Math.random() * 3).toISOString(),
+      action: 'System Login',
+      method: '',
+      result: 'success',
+      ipAddress: `192.168.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`,
+      category: 'system',
+    });
+  }
+
+  // Account change logs — no result filter (all success)
+  for (let i = 0; i < 15; i++) {
+    const userIdx = i % 4;
+    logs.push({
+      id: `log-${id++}`,
+      userId: mockUsers[userIdx].id,
+      userName: mockUsers[userIdx].fullName,
+      timestamp: new Date(Date.now() - i * 10800000 * Math.random() * 2).toISOString(),
+      action: accountActions[i % accountActions.length],
+      method: accountDetails[i % accountDetails.length],
+      result: 'success',
+      ipAddress: `192.168.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`,
+      category: 'account',
+    });
+  }
+
+  return logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+}
+
+export const mockLogs: AccessLog[] = buildLogs();
 
 export const mockJoinRequests: JoinRequest[] = [
   { id: 'jr1', userId: '5', userName: 'Taylor Swift', email: 'taylor@mail.com', houseCode: 'NEST-A1B2', requestedAt: '2025-12-20', status: 'pending' },
