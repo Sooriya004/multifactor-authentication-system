@@ -1,19 +1,21 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
+from typing import Optional
 import random
 import json
 
 from ..database import get_db
 from ..models import (
-    Credential, AccessLog, OTPCode, User, AuthMethod,
-    CredentialType, LogResult, UnlockSession, UnlockSessionStatus,
+    Credential, AccessLog, OTPCode, User, AuthMethod, House,
+    HouseMembership, CredentialType, LogResult, UnlockSession, UnlockSessionStatus,
+    UserStatus,
 )
 from ..schemas import (
     AuthRequest, OTPResponse, ESPAuthResponse,
     UnlockSessionResponse, UnlockSessionUpdate,
 )
-from ..auth import get_current_active_user, get_current_admin
+from ..auth import get_current_active_user, get_house_id_header, get_membership, require_admin_membership
 
 router = APIRouter(prefix="/api", tags=["ESP32 Hardware"])
 
@@ -24,15 +26,23 @@ router = APIRouter(prefix="/api", tags=["ESP32 Hardware"])
 def create_unlock_session(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
+    x_house_id: Optional[str] = Depends(get_house_id_header),
 ):
     """
     User clicks 'Unlock Door' on the web app.
     Creates a session the ESP32 polls for and begins the auth sequence.
     """
-    # Get user's enabled auth methods in priority order
+    m = get_membership(db, current_user, x_house_id)
+
+    # Check lockdown
+    house = db.query(House).filter(House.id == m.house_id).first()
+    if house and house.lockdown:
+        raise HTTPException(status_code=403, detail="House is in lockdown. All access is blocked.")
+
+    # Get user's enabled auth methods in priority order (per membership)
     methods = (
         db.query(AuthMethod)
-        .filter(AuthMethod.user_id == current_user.id, AuthMethod.enabled == True)
+        .filter(AuthMethod.membership_id == m.id, AuthMethod.enabled == True)
         .order_by(AuthMethod.priority)
         .all()
     )
@@ -40,11 +50,11 @@ def create_unlock_session(
     if not methods:
         raise HTTPException(status_code=400, detail="No authentication methods enabled. Configure them in Auth Settings.")
 
-    method_list = [m.type.value for m in methods]
+    method_list = [mt.type.value for mt in methods]
 
     session = UnlockSession(
         user_id=current_user.id,
-        house_id=current_user.house_id,
+        house_id=m.house_id,
         status=UnlockSessionStatus.pending,
         auth_methods=json.dumps(method_list),
         current_method=None,
@@ -114,13 +124,13 @@ def update_unlock_session(
     if update.status in (UnlockSessionStatus.success, UnlockSessionStatus.failed):
         session.completed_at = datetime.utcnow()
         # Log the result
-        user = db.query(User).filter(User.id == session.user_id).first()
         log = AccessLog(
             user_id=session.user_id,
             house_id=session.house_id,
-            action="door_unlock",
+            action="door_access",
             method=session.current_method or "web_unlock",
             result=LogResult.success if update.status == UnlockSessionStatus.success else LogResult.failed,
+            category="access",
         )
         db.add(log)
 
@@ -199,10 +209,12 @@ def verify_authentication(request: AuthRequest, db: Session = Depends(get_db)):
     if request.method_used == "otp":
         valid_otp = db.query(OTPCode).filter(OTPCode.code == request.payload).first()
 
-        if valid_otp and datetime.now() < valid_otp.expires_at:
+        if valid_otp and datetime.utcnow() < valid_otp.expires_at:
             log = AccessLog(
-                user_id=None, house_id=None,
-                action="door_unlock", method="otp", result=LogResult.success,
+                user_id="system",
+                house_id=None,
+                action="door_access", method="otp", result=LogResult.success,
+                category="access",
             )
             db.add(log)
             db.delete(valid_otp)
@@ -210,14 +222,16 @@ def verify_authentication(request: AuthRequest, db: Session = Depends(get_db)):
             return {"status": "success", "action": "unlock"}
 
         log = AccessLog(
-            user_id=None, house_id=None,
-            action="door_unlock", method="otp", result=LogResult.failed,
+            user_id="system",
+            house_id=None,
+            action="door_access", method="otp", result=LogResult.failed,
+            category="access",
         )
         db.add(log)
         db.commit()
         return {"status": "failure", "action": "none"}
 
-    # --- Standard credential logic ---
+    # --- Standard credential logic (RFID, fingerprint, keypad) ---
     valid_cred = (
         db.query(Credential)
         .filter(
@@ -229,19 +243,51 @@ def verify_authentication(request: AuthRequest, db: Session = Depends(get_db)):
     )
 
     if valid_cred:
-        user = db.query(User).filter(User.id == valid_cred.user_id).first()
-        log = AccessLog(
-            user_id=valid_cred.user_id,
-            house_id=user.house_id if user else None,
-            action="door_unlock", method=request.method_used, result=LogResult.success,
-        )
-        db.add(log)
-        db.commit()
-        return {"status": "success", "action": "unlock"}
+        # Get user via membership
+        membership = db.query(HouseMembership).filter(
+            HouseMembership.id == valid_cred.membership_id
+        ).first()
+
+        if membership:
+            # Check if user is blocked or house is in lockdown
+            if membership.status == UserStatus.blocked:
+                log = AccessLog(
+                    user_id=membership.user_id,
+                    house_id=membership.house_id,
+                    action="door_access", method=request.method_used, result=LogResult.failed,
+                    category="access",
+                )
+                db.add(log)
+                db.commit()
+                return {"status": "failure", "action": "none"}
+
+            house = db.query(House).filter(House.id == membership.house_id).first()
+            if house and house.lockdown:
+                log = AccessLog(
+                    user_id=membership.user_id,
+                    house_id=membership.house_id,
+                    action="door_access", method=request.method_used, result=LogResult.failed,
+                    category="access",
+                )
+                db.add(log)
+                db.commit()
+                return {"status": "failure", "action": "none"}
+
+            log = AccessLog(
+                user_id=membership.user_id,
+                house_id=membership.house_id,
+                action="door_access", method=request.method_used, result=LogResult.success,
+                category="access",
+            )
+            db.add(log)
+            db.commit()
+            return {"status": "success", "action": "unlock"}
 
     log = AccessLog(
-        user_id=None, house_id=None,
-        action="door_unlock", method=request.method_used, result=LogResult.failed,
+        user_id="system",
+        house_id=None,
+        action="door_access", method=request.method_used, result=LogResult.failed,
+        category="access",
     )
     db.add(log)
     db.commit()
@@ -249,13 +295,31 @@ def verify_authentication(request: AuthRequest, db: Session = Depends(get_db)):
 
 
 @router.get("/otp/generate", response_model=OTPResponse)
-def generate_otp(db: Session = Depends(get_db)):
-    """Generate a 6-digit OTP valid for 5 minutes."""
+def generate_otp(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    x_house_id: Optional[str] = Depends(get_house_id_header),
+):
+    """Generate a 6-digit OTP valid for 5 minutes. Admin only."""
+    m = require_admin_membership(db, current_user, x_house_id)
+
     new_code = str(random.randint(100000, 999999))
-    expiration_time = datetime.now() + timedelta(minutes=5)
+    expiration_time = datetime.utcnow() + timedelta(minutes=5)
     db_otp = OTPCode(code=new_code, expires_at=expiration_time)
     db.add(db_otp)
+
+    # Log OTP generation
+    log = AccessLog(
+        user_id=current_user.id,
+        house_id=m.house_id,
+        action="OTP Generated",
+        method="Dashboard",
+        result=LogResult.success,
+        category="system",
+    )
+    db.add(log)
     db.commit()
+
     return {"status": "success", "otp": new_code, "expires_in": "5 minutes"}
 
 
@@ -268,14 +332,91 @@ def esp_status():
 @router.post("/esp/emergency-unlock")
 def emergency_unlock(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_user: User = Depends(get_current_active_user),
+    x_house_id: Optional[str] = Depends(get_house_id_header),
 ):
     """Admin-only emergency remote unlock."""
+    m = require_admin_membership(db, current_user, x_house_id)
+
+    # Check lockdown
+    house = db.query(House).filter(House.id == m.house_id).first()
+    if house and house.lockdown:
+        raise HTTPException(status_code=403, detail="Cannot emergency unlock during lockdown")
+
     log = AccessLog(
         user_id=current_user.id,
-        house_id=current_user.house_id,
-        action="emergency_unlock", method="admin_override", result=LogResult.success,
+        house_id=m.house_id,
+        action="Emergency Unlock", method="admin_override", result=LogResult.success,
+        category="access",
     )
     db.add(log)
     db.commit()
     return {"status": "success", "action": "unlock"}
+
+
+# ─── Lockdown Management ────────────────────────────────────────
+
+@router.get("/house/lockdown")
+def get_lockdown_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    x_house_id: Optional[str] = Depends(get_house_id_header),
+):
+    """Get lockdown status for the active house."""
+    m = get_membership(db, current_user, x_house_id)
+    house = db.query(House).filter(House.id == m.house_id).first()
+    if not house:
+        raise HTTPException(status_code=404, detail="House not found")
+
+    lockdown_user = None
+    if house.lockdown_by:
+        u = db.query(User).filter(User.id == house.lockdown_by).first()
+        lockdown_user = u.full_name if u else house.lockdown_by
+
+    return {
+        "lockdown": house.lockdown,
+        "lockdown_by": lockdown_user,
+        "lockdown_at": house.lockdown_at.isoformat() if house.lockdown_at else None,
+    }
+
+
+@router.post("/house/lockdown")
+def set_lockdown(
+    data: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    x_house_id: Optional[str] = Depends(get_house_id_header),
+):
+    """Toggle lockdown — primary admin only."""
+    m = get_membership(db, current_user, x_house_id)
+    if not m.is_primary_admin:
+        raise HTTPException(status_code=403, detail="Only the primary admin can control lockdown")
+
+    house = db.query(House).filter(House.id == m.house_id).first()
+    if not house:
+        raise HTTPException(status_code=404, detail="House not found")
+
+    active = data.get("active", not house.lockdown)
+    house.lockdown = active
+
+    if active:
+        house.lockdown_by = current_user.id
+        house.lockdown_at = datetime.utcnow()
+        action = "Lockdown Activated"
+    else:
+        house.lockdown_by = None
+        house.lockdown_at = None
+        action = "Lockdown Lifted"
+
+    log = AccessLog(
+        user_id=current_user.id,
+        house_id=m.house_id,
+        action=action,
+        method="Dashboard",
+        result=LogResult.success,
+        category="system",
+    )
+    db.add(log)
+    db.commit()
+
+    return {"message": action, "lockdown": house.lockdown}

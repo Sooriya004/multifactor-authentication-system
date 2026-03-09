@@ -6,7 +6,7 @@ import string
 from ..database import get_db
 from ..models import User, House, HouseMembership, JoinRequest, UserRole, UserStatus, JoinRequestStatus
 from ..schemas import UserCreate, UserLogin, UserResponse, MembershipResponse, Token
-from ..auth import verify_password, get_password_hash, create_access_token
+from ..auth import verify_password, get_password_hash, create_access_token, get_current_user
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -140,6 +140,6 @@ async def login(credentials: UserLogin, db: Session = Depends(get_db)):
 @router.get("/me", response_model=dict)
 async def get_me(
     db: Session = Depends(get_db),
-    current_user: User = Depends(__import__('app.auth', fromlist=['get_current_user']).get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     return build_user_response(current_user, db)
