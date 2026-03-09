@@ -4,7 +4,7 @@ from typing import List, Optional
 from datetime import datetime
 
 from ..database import get_db
-from ..models import User, House, HouseMembership, JoinRequest, AccessLog, UserRole, UserStatus, JoinRequestStatus
+from ..models import User, House, HouseMembership, JoinRequest, AccessLog, UserRole, UserStatus, JoinRequestStatus, LogResult
 from ..schemas import UserResponse, MembershipResponse, UserRoleUpdate, UserStatusUpdate, UserUpdate, JoinRequestResponse, PasswordChange, EmailChange
 from ..auth import get_current_active_user, get_house_id_header, get_membership, require_admin_membership, verify_password, get_password_hash
 
@@ -104,6 +104,13 @@ async def approve_join_request(
     if m:
         m.status = UserStatus.active
 
+    req_user = db.query(User).filter(User.id == join_req.user_id).first()
+    log = AccessLog(
+        user_id=current_user.id, house_id=admin_m.house_id,
+        action=f"Join Request Approved: {req_user.full_name if req_user else 'Unknown'}",
+        method="Dashboard", result=LogResult.success, category="account",
+    )
+    db.add(log)
     db.commit()
     return {"message": "Join request approved"}
 
@@ -136,6 +143,13 @@ async def reject_join_request(
     if m:
         db.delete(m)
 
+    req_user = db.query(User).filter(User.id == join_req.user_id).first()
+    log = AccessLog(
+        user_id=current_user.id, house_id=admin_m.house_id,
+        action=f"Join Request Rejected: {req_user.full_name if req_user else 'Unknown'}",
+        method="Dashboard", result=LogResult.success, category="account",
+    )
+    db.add(log)
     db.commit()
     return {"message": "Join request rejected"}
 
@@ -159,7 +173,15 @@ async def update_user_role(
     if target_m.is_primary_admin and role_update.role == UserRole.member:
         raise HTTPException(status_code=400, detail="Cannot demote primary admin")
 
+    target_user = db.query(User).filter(User.id == user_id).first()
     target_m.role = role_update.role
+
+    log = AccessLog(
+        user_id=current_user.id, house_id=admin_m.house_id,
+        action=f"Role Changed: {target_user.full_name if target_user else 'Unknown'} → {role_update.role.value}",
+        method="Dashboard", result=LogResult.success, category="account",
+    )
+    db.add(log)
     db.commit()
     return {"message": f"User role updated to {role_update.role.value}"}
 
@@ -182,7 +204,15 @@ async def update_user_status(
     if target_m.is_primary_admin:
         raise HTTPException(status_code=400, detail="Cannot modify primary admin status")
 
+    target_user = db.query(User).filter(User.id == user_id).first()
     target_m.status = status_update.status
+
+    log = AccessLog(
+        user_id=current_user.id, house_id=admin_m.house_id,
+        action=f"Status Changed: {target_user.full_name if target_user else 'Unknown'} → {status_update.status.value}",
+        method="Dashboard", result=LogResult.success, category="account",
+    )
+    db.add(log)
     db.commit()
     return {"message": f"User status updated to {status_update.status.value}"}
 
@@ -204,6 +234,13 @@ async def remove_user(
     if target_m.is_primary_admin:
         raise HTTPException(status_code=400, detail="Cannot remove primary admin")
 
+    target_user = db.query(User).filter(User.id == user_id).first()
+    log = AccessLog(
+        user_id=current_user.id, house_id=admin_m.house_id,
+        action=f"User Removed: {target_user.full_name if target_user else 'Unknown'}",
+        method="Dashboard", result=LogResult.success, category="account",
+    )
+    db.add(log)
     db.delete(target_m)
     db.commit()
     return {"message": "User removed from house"}
@@ -220,6 +257,11 @@ async def self_block(
         raise HTTPException(status_code=400, detail="Primary admin cannot self-block")
 
     m.status = UserStatus.blocked
+    log = AccessLog(
+        user_id=current_user.id, house_id=m.house_id,
+        action="Self-Blocked", method="Dashboard", result=LogResult.success, category="account",
+    )
+    db.add(log)
     db.commit()
     return {"message": "Account blocked in this house. Contact admin to unblock."}
 
