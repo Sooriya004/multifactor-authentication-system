@@ -64,7 +64,7 @@ class User(Base):
     joined_at = Column(DateTime, default=datetime.utcnow)
 
     memberships = relationship("HouseMembership", back_populates="user")
-    access_logs = relationship("AccessLog", back_populates="user")
+    access_logs = relationship("AccessLog", back_populates="user", foreign_keys="[AccessLog.user_id]")
 
 # Many-to-many: User ↔ House with per-house role
 class HouseMembership(Base):
@@ -83,7 +83,7 @@ class HouseMembership(Base):
     credentials = relationship("Credential", back_populates="membership")
     auth_methods = relationship("AuthMethod", back_populates="membership")
 
-# Credential entity — now per-membership (per house)
+# Credential entity — per-membership (per house)
 class Credential(Base):
     __tablename__ = "credentials"
 
@@ -97,7 +97,7 @@ class Credential(Base):
 
     membership = relationship("HouseMembership", back_populates="credentials")
 
-# Authentication Method preferences — now per-membership
+# Authentication Method preferences — per-membership
 class AuthMethod(Base):
     __tablename__ = "auth_methods"
 
@@ -114,17 +114,17 @@ class AccessLog(Base):
     __tablename__ = "access_logs"
 
     id = Column(String, primary_key=True, default=generate_uuid)
-    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    user_id = Column(String, nullable=False)  # Can be a user UUID or "system" for anonymous events
     house_id = Column(String, ForeignKey("houses.id"), nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
     action = Column(String(100), nullable=False)
     method = Column(String(50), nullable=False)
     result = Column(SQLEnum(LogResult), default=LogResult.success)
-    category = Column(String(50), nullable=True)
+    category = Column(String(50), nullable=True)  # "access", "system", "account"
     ip_address = Column(String(50), nullable=True)
     device_id = Column(String(100), nullable=True)
 
-    user = relationship("User", back_populates="access_logs")
+    user = relationship("User", back_populates="access_logs", foreign_keys=[user_id], primaryjoin="AccessLog.user_id == User.id")
 
 # Join Request entity
 class JoinRequest(Base):
