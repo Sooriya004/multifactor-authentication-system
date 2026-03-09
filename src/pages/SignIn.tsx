@@ -5,6 +5,7 @@ import { Shield, Eye, EyeOff, ArrowLeft } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Checkbox } from '@/components/ui/checkbox';
 import { useAuth } from '@/lib/authContext';
 import { toast } from 'sonner';
 
@@ -12,6 +13,7 @@ const SignIn = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
@@ -24,8 +26,8 @@ const SignIn = () => {
       await login(email, password);
       toast.success('Welcome back!');
       navigate('/dashboard');
-    } catch {
-      toast.error('Invalid credentials');
+    } catch (err: any) {
+      toast.error(err.message || 'Invalid credentials');
     } finally {
       setLoading(false);
     }
@@ -69,6 +71,14 @@ const SignIn = () => {
                   {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Checkbox id="remember" checked={rememberMe} onCheckedChange={(c) => setRememberMe(!!c)} />
+                <Label htmlFor="remember" className="text-sm text-muted-foreground cursor-pointer">Remember me</Label>
+              </div>
+              <button type="button" className="text-sm text-primary hover:underline">Forgot password?</button>
             </div>
 
             <Button type="submit" disabled={loading} className="w-full gradient-primary text-primary-foreground font-semibold glow-primary h-11">

@@ -30,17 +30,27 @@ const SignUp = () => {
 
     setLoading(true);
     try {
-      await signup({ fullName: form.fullName, email: form.email, password: form.password, role: form.role, houseCode: form.houseCode });
-      if (form.role === 'admin') {
-        const code = `NEST-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
-        setGeneratedCode(code);
+      const result = await signup({
+        fullName: form.fullName,
+        email: form.email,
+        password: form.password,
+        phone: form.phone || undefined,
+        address: form.address || undefined,
+        dob: form.dob || undefined,
+        role: form.role,
+        houseCode: form.houseCode || undefined,
+      });
+      if (result.houseCode) {
+        setGeneratedCode(result.houseCode);
         toast.success('House created! Share your code with members.');
-      } else {
+      } else if (result.pendingApproval) {
         toast.success('Join request sent! Waiting for admin approval.');
         navigate('/dashboard');
+      } else {
+        navigate('/dashboard');
       }
-    } catch {
-      toast.error('Signup failed');
+    } catch (err: any) {
+      toast.error(err.message || 'Signup failed');
     } finally {
       setLoading(false);
     }
