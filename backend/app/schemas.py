@@ -133,6 +133,28 @@ class OTPResponse(BaseModel):
     otp: str
     expires_in: str
 
+
+class FingerprintRegisterStartResponse(BaseModel):
+    message: str
+    register_fingerprint: bool
+    fingerprint_id: int
+
+
+class DeviceRegisterCheckResponse(BaseModel):
+    register_fingerprint: bool
+    fingerprint_id: Optional[int] = None
+
+
+class DeviceRegisterCompleteRequest(BaseModel):
+    fingerprint_id: int
+    success: bool = True
+
+
+class DeviceRegisterCompleteResponse(BaseModel):
+    status: str
+    message: str
+    fingerprint_id: int
+
 # Auth Method schemas
 class AuthMethodUpdate(BaseModel):
     type: CredentialType

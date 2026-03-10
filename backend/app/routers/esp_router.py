@@ -9,11 +9,12 @@ from ..database import get_db
 from ..models import (
     Credential, AccessLog, OTPCode, User, AuthMethod, House,
     HouseMembership, CredentialType, LogResult, UnlockSession, UnlockSessionStatus,
-    UserStatus,
+    UserStatus, FingerprintRegistrationRequest, FingerprintRegistrationStatus,
 )
 from ..schemas import (
     AuthRequest, OTPResponse, ESPAuthResponse,
     UnlockSessionResponse, UnlockSessionUpdate,
+    DeviceRegisterCheckResponse, DeviceRegisterCompleteRequest, DeviceRegisterCompleteResponse,
 )
 from ..auth import get_current_active_user, get_house_id_header, get_membership, require_admin_membership
 
@@ -199,97 +200,213 @@ def get_next_pending_session(db: Session = Depends(get_db)):
 
 # ─── Direct ESP32 Auth (sensor-initiated) ───────────────────────
 
+@router.get("/device/register_check", response_model=DeviceRegisterCheckResponse)
+def device_register_check(db: Session = Depends(get_db)):
+    """
+    ESP32 polling endpoint.
+    Returns the next pending fingerprint registration request, if any.
+    """
+    pending = (
+        db.query(FingerprintRegistrationRequest)
+        .filter(FingerprintRegistrationRequest.status == FingerprintRegistrationStatus.pending)
+        .order_by(FingerprintRegistrationRequest.requested_at)
+        .first()
+    )
+
+    if not pending:
+        return DeviceRegisterCheckResponse(register_fingerprint=False)
+
+    return DeviceRegisterCheckResponse(
+        register_fingerprint=True,
+        fingerprint_id=pending.fingerprint_id,
+    )
+
+
+@router.post("/device/register_complete", response_model=DeviceRegisterCompleteResponse)
+def device_register_complete(
+    payload: DeviceRegisterCompleteRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    ESP32 completion callback after enrolling a fingerprint template.
+    """
+    pending = (
+        db.query(FingerprintRegistrationRequest)
+        .filter(
+            FingerprintRegistrationRequest.fingerprint_id == payload.fingerprint_id,
+            FingerprintRegistrationRequest.status == FingerprintRegistrationStatus.pending,
+        )
+        .order_by(FingerprintRegistrationRequest.requested_at)
+        .first()
+    )
+    if not pending:
+        raise HTTPException(status_code=404, detail="No pending registration found for fingerprint ID")
+
+    pending.status = (
+        FingerprintRegistrationStatus.completed if payload.success else FingerprintRegistrationStatus.failed
+    )
+    pending.completed_at = datetime.utcnow()
+
+    if payload.success:
+        credential = (
+            db.query(Credential)
+            .filter(
+                Credential.membership_id == pending.membership_id,
+                Credential.type == CredentialType.fingerprint,
+            )
+            .first()
+        )
+        if not credential:
+            credential = Credential(
+                membership_id=pending.membership_id,
+                type=CredentialType.fingerprint,
+            )
+            db.add(credential)
+
+        credential.credential_value = str(payload.fingerprint_id)
+        credential.data = f"fingerprint_template:{payload.fingerprint_id}"
+        credential.registered = True
+        credential.registered_at = datetime.utcnow()
+
+    db.add(
+        AccessLog(
+            user_id=pending.requested_by_user_id,
+            house_id=pending.house_id,
+            action=(
+                f"Fingerprint registered (ID {payload.fingerprint_id})"
+                if payload.success
+                else f"Fingerprint registration failed (ID {payload.fingerprint_id})"
+            ),
+            method="fingerprint",
+            result=LogResult.success if payload.success else LogResult.failed,
+            category="system",
+        )
+    )
+
+    db.commit()
+    return DeviceRegisterCompleteResponse(
+        status="success" if payload.success else "failure",
+        message=(
+            "Fingerprint registered and stored"
+            if payload.success
+            else "Fingerprint registration marked as failed"
+        ),
+        fingerprint_id=payload.fingerprint_id,
+    )
+
+
 @router.post("/auth/verify", response_model=ESPAuthResponse)
 def verify_authentication(request: AuthRequest, db: Session = Depends(get_db)):
     """
     ESP32 endpoint — receives method + payload from sensors,
     verifies against the database, logs the attempt, returns unlock/none.
     """
-    # --- OTP Logic ---
-    if request.method_used == "otp":
-        valid_otp = db.query(OTPCode).filter(OTPCode.code == request.payload).first()
+    method_used = request.method_used.strip().lower()
 
+    if method_used == "otp":
+        valid_otp = db.query(OTPCode).filter(OTPCode.code == request.payload).first()
         if valid_otp and datetime.utcnow() < valid_otp.expires_at:
-            log = AccessLog(
-                user_id="system",
-                house_id=None,
-                action="door_access", method="otp", result=LogResult.success,
-                category="access",
+            db.add(
+                AccessLog(
+                    user_id="system",
+                    house_id=None,
+                    action="door_access",
+                    method="otp",
+                    result=LogResult.success,
+                    category="access",
+                )
             )
-            db.add(log)
             db.delete(valid_otp)
             db.commit()
             return {"status": "success", "action": "unlock"}
 
-        log = AccessLog(
-            user_id="system",
-            house_id=None,
-            action="door_access", method="otp", result=LogResult.failed,
-            category="access",
+        db.add(
+            AccessLog(
+                user_id="system",
+                house_id=None,
+                action="door_access",
+                method="otp",
+                result=LogResult.failed,
+                category="access",
+            )
         )
-        db.add(log)
         db.commit()
         return {"status": "failure", "action": "none"}
 
-    # --- Standard credential logic (RFID, fingerprint, keypad) ---
+    if method_used == "pin":
+        credential_type = CredentialType.keypad
+        log_method = "pin"
+    elif method_used in {"keypad", "fingerprint", "rfid"}:
+        credential_type = CredentialType(method_used)
+        log_method = method_used
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported auth method")
+
     valid_cred = (
         db.query(Credential)
         .filter(
-            Credential.type == request.method_used,
+            Credential.type == credential_type,
             Credential.credential_value == request.payload,
-            Credential.registered == True,
+            Credential.registered == True,  # noqa: E712
         )
         .first()
     )
 
     if valid_cred:
-        # Get user via membership
-        membership = db.query(HouseMembership).filter(
-            HouseMembership.id == valid_cred.membership_id
-        ).first()
-
+        membership = db.query(HouseMembership).filter(HouseMembership.id == valid_cred.membership_id).first()
         if membership:
-            # Check if user is blocked or house is in lockdown
             if membership.status == UserStatus.blocked:
-                log = AccessLog(
-                    user_id=membership.user_id,
-                    house_id=membership.house_id,
-                    action="door_access", method=request.method_used, result=LogResult.failed,
-                    category="access",
+                db.add(
+                    AccessLog(
+                        user_id=membership.user_id,
+                        house_id=membership.house_id,
+                        action="door_access",
+                        method=log_method,
+                        result=LogResult.failed,
+                        category="access",
+                    )
                 )
-                db.add(log)
                 db.commit()
                 return {"status": "failure", "action": "none"}
 
             house = db.query(House).filter(House.id == membership.house_id).first()
             if house and house.lockdown:
-                log = AccessLog(
-                    user_id=membership.user_id,
-                    house_id=membership.house_id,
-                    action="door_access", method=request.method_used, result=LogResult.failed,
-                    category="access",
+                db.add(
+                    AccessLog(
+                        user_id=membership.user_id,
+                        house_id=membership.house_id,
+                        action="door_access",
+                        method=log_method,
+                        result=LogResult.failed,
+                        category="access",
+                    )
                 )
-                db.add(log)
                 db.commit()
                 return {"status": "failure", "action": "none"}
 
-            log = AccessLog(
-                user_id=membership.user_id,
-                house_id=membership.house_id,
-                action="door_access", method=request.method_used, result=LogResult.success,
-                category="access",
+            db.add(
+                AccessLog(
+                    user_id=membership.user_id,
+                    house_id=membership.house_id,
+                    action="door_access",
+                    method=log_method,
+                    result=LogResult.success,
+                    category="access",
+                )
             )
-            db.add(log)
             db.commit()
             return {"status": "success", "action": "unlock"}
 
-    log = AccessLog(
-        user_id="system",
-        house_id=None,
-        action="door_access", method=request.method_used, result=LogResult.failed,
-        category="access",
+    db.add(
+        AccessLog(
+            user_id="system",
+            house_id=None,
+            action="door_access",
+            method=log_method,
+            result=LogResult.failed,
+            category="access",
+        )
     )
-    db.add(log)
     db.commit()
     return {"status": "failure", "action": "none"}
 

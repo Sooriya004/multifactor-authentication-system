@@ -11,7 +11,10 @@ from .config import get_settings
 from .models import User, HouseMembership
 
 settings = get_settings()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# NOTE:
+# passlib==1.7.4 + bcrypt>=5 causes runtime failures on hash/verify.
+# Use pbkdf2_sha256 to keep password hashing stable without external bcrypt backend coupling.
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 security = HTTPBearer()
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

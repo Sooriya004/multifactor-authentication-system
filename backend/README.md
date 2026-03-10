@@ -63,7 +63,13 @@ SECRET_KEY=your-super-secret-key
 
 ### Credentials
 - `GET /credentials/` - Get user's credentials
-- `POST /credentials/{type}/register` - Register credential
+- `POST /credentials/{type}/register` - Register RFID/Keypad credential
+- `POST /credentials/fingerprint/register-request` - Start fingerprint registration request (web action)
 - `DELETE /credentials/{type}` - Unregister credential
 - `GET /credentials/auth-methods` - Get auth method preferences
 - `PUT /credentials/auth-methods` - Update auth methods
+
+### Device/Auth APIs
+- `POST /api/auth/verify` - Verify PIN / OTP / Fingerprint (ESP32)
+- `GET /api/device/register_check` - ESP32 polling endpoint for fingerprint registration request
+- `POST /api/device/register_complete` - ESP32 callback to store enrolled fingerprint ID

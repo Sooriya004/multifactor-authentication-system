@@ -1,5 +1,5 @@
 from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Enum as SQLEnum, Integer
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, foreign
 from sqlalchemy.sql import func
 from datetime import datetime
 import enum
@@ -35,6 +35,12 @@ class CredentialType(str, enum.Enum):
     keypad = "keypad"
     otp = "otp"
 
+
+class FingerprintRegistrationStatus(str, enum.Enum):
+    pending = "pending"
+    completed = "completed"
+    failed = "failed"
+
 # House entity
 class House(Base):
     __tablename__ = "houses"
@@ -64,7 +70,11 @@ class User(Base):
     joined_at = Column(DateTime, default=datetime.utcnow)
 
     memberships = relationship("HouseMembership", back_populates="user")
-    access_logs = relationship("AccessLog", back_populates="user", foreign_keys="[AccessLog.user_id]")
+    access_logs = relationship(
+        "AccessLog",
+        back_populates="user",
+        primaryjoin="User.id == foreign(AccessLog.user_id)",
+    )
 
 # Many-to-many: User ↔ House with per-house role
 class HouseMembership(Base):
@@ -97,6 +107,19 @@ class Credential(Base):
 
     membership = relationship("HouseMembership", back_populates="credentials")
 
+
+class FingerprintRegistrationRequest(Base):
+    __tablename__ = "fingerprint_registration_requests"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    membership_id = Column(String, ForeignKey("house_memberships.id", ondelete="CASCADE"), nullable=False)
+    house_id = Column(String, ForeignKey("houses.id", ondelete="CASCADE"), nullable=False)
+    requested_by_user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    fingerprint_id = Column(Integer, nullable=False, index=True)
+    status = Column(SQLEnum(FingerprintRegistrationStatus), default=FingerprintRegistrationStatus.pending, nullable=False)
+    requested_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
 # Authentication Method preferences — per-membership
 class AuthMethod(Base):
     __tablename__ = "auth_methods"
@@ -124,7 +147,12 @@ class AccessLog(Base):
     ip_address = Column(String(50), nullable=True)
     device_id = Column(String(100), nullable=True)
 
-    user = relationship("User", back_populates="access_logs", foreign_keys=[user_id], primaryjoin="AccessLog.user_id == User.id")
+    user = relationship(
+        "User",
+        back_populates="access_logs",
+        primaryjoin="foreign(AccessLog.user_id) == User.id",
+        foreign_keys=[user_id],
+    )
 
 # Join Request entity
 class JoinRequest(Base):
