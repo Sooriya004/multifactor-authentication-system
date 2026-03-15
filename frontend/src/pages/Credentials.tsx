@@ -3,8 +3,7 @@ import { motion } from 'framer-motion';
 import { Nfc, Fingerprint, KeySquare, CheckCircle, XCircle, Plus, Trash2, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
+
 import { useAuth } from '@/lib/authContext';
 import { credentialsApi, type ApiCredential } from '@/lib/api';
 import { mockCredentials } from '@/lib/mockData';
@@ -27,7 +26,6 @@ const Credentials = () => {
   const [credentials, setCredentials] = useState<ApiCredential[]>([]);
   const [loading, setLoading] = useState(true);
   const [registerType, setRegisterType] = useState<string | null>(null);
-  const [formValue, setFormValue] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [isMock, setIsMock] = useState(false);
 
@@ -49,24 +47,14 @@ const Credentials = () => {
 
   const handleRegister = async () => {
     if (!registerType) return;
-    if (registerType !== 'fingerprint' && !formValue.trim()) {
-      toast.error('Please enter a value');
-      return;
-    }
-
     setSubmitting(true);
     if (isMock) {
       setCredentials(c => c.map(cr => cr.type === registerType
         ? { ...cr, registered: true, registered_at: new Date().toISOString(), has_credential_value: true }
         : cr
       ));
-      if (registerType === 'fingerprint') {
-        toast.success('Fingerprint registration requested. Complete it on ESP32.');
-      } else {
-        toast.success(`${credentialMeta[registerType]?.label} registered successfully`);
-      }
+      toast.success('Registration requested. Complete it on ESP32.');
       setRegisterType(null);
-      setFormValue('');
       setSubmitting(false);
       return;
     }
@@ -76,12 +64,11 @@ const Credentials = () => {
         const response = await credentialsApi.requestFingerprintRegistration();
         toast.success(`${response.message} Assigned ID: ${response.fingerprint_id}`);
       } else {
-        await credentialsApi.register(registerType, formValue, formValue);
-        toast.success(`${credentialMeta[registerType]?.label || registerType} registered successfully`);
+        const response = await credentialsApi.requestDeviceRegistration(registerType);
+        toast.success(response.message);
       }
 
       setRegisterType(null);
-      setFormValue('');
       await fetchCredentials();
     } catch (err: any) {
       toast.error(err.message || 'Registration failed');
@@ -178,28 +165,15 @@ const Credentials = () => {
           </DialogHeader>
           <div className="space-y-4">
             <p className="text-sm text-muted-foreground">
-              {registerType === 'rfid' && 'Scan your RFID tag on the ESP32 reader, then enter the Tag ID shown on the OLED display.'}
-              {registerType === 'fingerprint' && 'This will enable fingerprint enrollment on ESP32. After you click Register, place your finger on the sensor when prompted on the device screen.'}
-              {registerType === 'keypad' && 'Choose a secure PIN/password you\'ll enter on the ESP32 keypad.'}
+              {registerType === 'rfid' && 'Tap your RFID tag on the ESP32 reader when prompted on the device screen.'}
+              {registerType === 'fingerprint' && 'This will enable fingerprint enrollment on ESP32. After you click Start, place your finger on the sensor when prompted on the device screen.'}
+              {registerType === 'keypad' && 'Enter your PIN on the ESP32 keypad when prompted on the device screen.'}
             </p>
-            {registerType !== 'fingerprint' && (
-              <div className="space-y-2">
-                <Label className="text-foreground">
-                  {registerType === 'rfid' ? 'RFID Tag ID' : 'Keypad Password'}
-                </Label>
-                <Input
-                  placeholder={registerType === 'rfid' ? 'e.g. A1:B2:C3:D4' : 'Enter PIN'}
-                  value={formValue}
-                  onChange={e => setFormValue(e.target.value)}
-                  className="bg-secondary border-border"
-                />
-              </div>
-            )}
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setRegisterType(null)}>Cancel</Button>
             <Button onClick={handleRegister} disabled={submitting} className="gradient-primary text-primary-foreground">
-              {submitting ? 'Registering...' : registerType === 'fingerprint' ? 'Start Registration' : 'Register'}
+              {submitting ? 'Starting...' : 'Start Registration'}
             </Button>
           </DialogFooter>
         </DialogContent>

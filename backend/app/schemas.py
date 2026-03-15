@@ -64,6 +64,8 @@ class UserResponse(BaseModel):
     full_name: str
     email: str
     phone: Optional[str]
+    address: Optional[str] = None
+    dob: Optional[str] = None
     memberships: List[MembershipResponse] = []
     # Legacy compat fields (for active house context)
     role: Optional[UserRole] = None
@@ -139,10 +141,21 @@ class FingerprintRegisterStartResponse(BaseModel):
     register_fingerprint: bool
     fingerprint_id: int
 
+class CredentialRegisterStartResponse(BaseModel):
+    message: str
+    register_credential: bool
+    credential_type: CredentialType
+    request_id: str
+
 
 class DeviceRegisterCheckResponse(BaseModel):
     register_fingerprint: bool
     fingerprint_id: Optional[int] = None
+
+class DeviceCredentialCheckResponse(BaseModel):
+    register_credential: bool
+    credential_type: Optional[CredentialType] = None
+    request_id: Optional[str] = None
 
 
 class DeviceRegisterCompleteRequest(BaseModel):
@@ -154,6 +167,17 @@ class DeviceRegisterCompleteResponse(BaseModel):
     status: str
     message: str
     fingerprint_id: int
+
+class DeviceCredentialCompleteRequest(BaseModel):
+    request_id: str
+    credential_type: CredentialType
+    credential_value: str
+    success: bool = True
+
+class DeviceCredentialCompleteResponse(BaseModel):
+    status: str
+    message: str
+    credential_type: CredentialType
 
 # Auth Method schemas
 class AuthMethodUpdate(BaseModel):

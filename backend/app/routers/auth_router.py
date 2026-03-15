@@ -31,13 +31,18 @@ def build_user_response(user: User, db: Session) -> dict:
             joined_at=m.joined_at,
         ))
 
+    def _enum_value(value):
+        return value.value if hasattr(value, "value") else value
+
     # Legacy compat: pick first active membership for role/house_id
-    active = next((m for m in membership_list if m.status == UserStatus.active), None)
+    active = next((m for m in membership_list if _enum_value(m.status) == "active"), None)
     return UserResponse(
         id=user.id,
         full_name=user.full_name,
         email=user.email,
         phone=user.phone,
+        address=user.address,
+        dob=user.dob,
         memberships=membership_list,
         role=active.role if active else None,
         is_primary_admin=active.is_primary_admin if active else False,

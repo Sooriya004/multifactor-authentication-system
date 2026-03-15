@@ -10,11 +10,13 @@ from ..models import (
     Credential, AccessLog, OTPCode, User, AuthMethod, House,
     HouseMembership, CredentialType, LogResult, UnlockSession, UnlockSessionStatus,
     UserStatus, FingerprintRegistrationRequest, FingerprintRegistrationStatus,
+    CredentialRegistrationRequest, CredentialRegistrationStatus,
 )
 from ..schemas import (
     AuthRequest, OTPResponse, ESPAuthResponse,
     UnlockSessionResponse, UnlockSessionUpdate,
     DeviceRegisterCheckResponse, DeviceRegisterCompleteRequest, DeviceRegisterCompleteResponse,
+    DeviceCredentialCheckResponse, DeviceCredentialCompleteRequest, DeviceCredentialCompleteResponse,
 )
 from ..auth import get_current_active_user, get_house_id_header, get_membership, require_admin_membership
 
@@ -52,13 +54,14 @@ def create_unlock_session(
         raise HTTPException(status_code=400, detail="No authentication methods enabled. Configure them in Auth Settings.")
 
     method_list = [mt.type.value for mt in methods]
+    first_method = method_list[0] if method_list else None
 
     session = UnlockSession(
         user_id=current_user.id,
         house_id=m.house_id,
         status=UnlockSessionStatus.pending,
         auth_methods=json.dumps(method_list),
-        current_method=None,
+        current_method=first_method,
         expires_at=datetime.utcnow() + timedelta(minutes=2),
     )
     db.add(session)
@@ -118,22 +121,51 @@ def update_unlock_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    session.status = update.status
-    if update.current_method:
-        session.current_method = update.current_method
+    methods = json.loads(session.auth_methods)
+    current_method = update.current_method or session.current_method or (methods[0] if methods else None)
 
-    if update.status in (UnlockSessionStatus.success, UnlockSessionStatus.failed):
+    if update.status == UnlockSessionStatus.success:
+        # Current method succeeded; advance if more methods remain
+        if current_method in methods:
+            idx = methods.index(current_method)
+            if idx + 1 < len(methods):
+                session.status = UnlockSessionStatus.authenticating
+                session.current_method = methods[idx + 1]
+            else:
+                session.status = UnlockSessionStatus.success
+                session.current_method = current_method
+                session.completed_at = datetime.utcnow()
+                db.add(
+                    AccessLog(
+                        user_id=session.user_id,
+                        house_id=session.house_id,
+                        action="door_access",
+                        method=current_method or "web_unlock",
+                        result=LogResult.success,
+                        category="access",
+                    )
+                )
+        else:
+            session.status = UnlockSessionStatus.success
+            session.completed_at = datetime.utcnow()
+    elif update.status == UnlockSessionStatus.failed:
+        session.status = UnlockSessionStatus.failed
+        session.current_method = current_method
         session.completed_at = datetime.utcnow()
-        # Log the result
-        log = AccessLog(
-            user_id=session.user_id,
-            house_id=session.house_id,
-            action="door_access",
-            method=session.current_method or "web_unlock",
-            result=LogResult.success if update.status == UnlockSessionStatus.success else LogResult.failed,
-            category="access",
+        db.add(
+            AccessLog(
+                user_id=session.user_id,
+                house_id=session.house_id,
+                action="door_access",
+                method=current_method or "web_unlock",
+                result=LogResult.failed,
+                category="access",
+            )
         )
-        db.add(log)
+    else:
+        session.status = update.status
+        if current_method:
+            session.current_method = current_method
 
     db.commit()
     db.refresh(session)
@@ -195,6 +227,7 @@ def get_next_pending_session(db: Session = Depends(get_db)):
         "session_id": session.id,
         "user_name": user.full_name if user else "Unknown",
         "auth_methods": json.loads(session.auth_methods),
+        "current_method": session.current_method,
     }
 
 
@@ -219,6 +252,29 @@ def device_register_check(db: Session = Depends(get_db)):
     return DeviceRegisterCheckResponse(
         register_fingerprint=True,
         fingerprint_id=pending.fingerprint_id,
+    )
+
+
+@router.get("/device/credential_check", response_model=DeviceCredentialCheckResponse)
+def device_credential_check(db: Session = Depends(get_db)):
+    """
+    ESP32 polling endpoint for RFID/Keypad registration.
+    Returns the next pending credential registration request, if any.
+    """
+    pending = (
+        db.query(CredentialRegistrationRequest)
+        .filter(CredentialRegistrationRequest.status == CredentialRegistrationStatus.pending)
+        .order_by(CredentialRegistrationRequest.requested_at)
+        .first()
+    )
+
+    if not pending:
+        return DeviceCredentialCheckResponse(register_credential=False)
+
+    return DeviceCredentialCheckResponse(
+        register_credential=True,
+        credential_type=pending.credential_type,
+        request_id=pending.id,
     )
 
 
@@ -292,6 +348,80 @@ def device_register_complete(
             else "Fingerprint registration marked as failed"
         ),
         fingerprint_id=payload.fingerprint_id,
+    )
+
+
+@router.post("/device/credential_complete", response_model=DeviceCredentialCompleteResponse)
+def device_credential_complete(
+    payload: DeviceCredentialCompleteRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    ESP32 completion callback after enrolling RFID/Keypad credentials.
+    """
+    pending = (
+        db.query(CredentialRegistrationRequest)
+        .filter(
+            CredentialRegistrationRequest.id == payload.request_id,
+            CredentialRegistrationRequest.credential_type == payload.credential_type,
+            CredentialRegistrationRequest.status == CredentialRegistrationStatus.pending,
+        )
+        .order_by(CredentialRegistrationRequest.requested_at)
+        .first()
+    )
+    if not pending:
+        raise HTTPException(status_code=404, detail="No pending registration found for this request")
+
+    pending.status = (
+        CredentialRegistrationStatus.completed if payload.success else CredentialRegistrationStatus.failed
+    )
+    pending.completed_at = datetime.utcnow()
+
+    if payload.success:
+        credential = (
+            db.query(Credential)
+            .filter(
+                Credential.membership_id == pending.membership_id,
+                Credential.type == payload.credential_type,
+            )
+            .first()
+        )
+        if not credential:
+            credential = Credential(
+                membership_id=pending.membership_id,
+                type=payload.credential_type,
+            )
+            db.add(credential)
+
+        credential.credential_value = payload.credential_value
+        credential.data = f"{payload.credential_type.value}:{payload.credential_value}"
+        credential.registered = True
+        credential.registered_at = datetime.utcnow()
+
+    db.add(
+        AccessLog(
+            user_id=pending.requested_by_user_id,
+            house_id=pending.house_id,
+            action=(
+                f"{payload.credential_type.value.upper()} registered"
+                if payload.success
+                else f"{payload.credential_type.value.upper()} registration failed"
+            ),
+            method=payload.credential_type.value,
+            result=LogResult.success if payload.success else LogResult.failed,
+            category="system",
+        )
+    )
+
+    db.commit()
+    return DeviceCredentialCompleteResponse(
+        status="success" if payload.success else "failure",
+        message=(
+            f"{payload.credential_type.value.upper()} registered and stored"
+            if payload.success
+            else f"{payload.credential_type.value.upper()} registration marked as failed"
+        ),
+        credential_type=payload.credential_type,
     )
 
 

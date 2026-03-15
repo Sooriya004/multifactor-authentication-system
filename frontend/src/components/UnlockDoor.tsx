@@ -4,6 +4,8 @@ import { LockOpen, Loader2, X, Nfc, Fingerprint, KeySquare, Smartphone, CheckCir
 import { Button } from '@/components/ui/button';
 import { espApi, type ApiUnlockSession } from '@/lib/api';
 import { useLockdown } from '@/lib/lockdownContext';
+import { useAuth } from '@/lib/authContext';
+import { mockAuthMethods } from '@/lib/mockData';
 import { toast } from 'sonner';
 
 const methodIcons: Record<string, typeof Nfc> = {
@@ -33,6 +35,7 @@ const statusConfig: Record<string, { color: string; label: string }> = {
 
 const UnlockDoor = () => {
   const { isLockdown } = useLockdown();
+  const { isMockMode } = useAuth();
   const [session, setSession] = useState<ApiUnlockSession | null>(null);
   const [loading, setLoading] = useState(false);
   const [mockStep, setMockStep] = useState<number>(-1);
@@ -107,8 +110,15 @@ const UnlockDoor = () => {
       setSession(newSession);
       startPolling(newSession.id);
     } catch {
-      // Mock fallback
-      const mockMethods = ['rfid', 'keypad'];
+      if (!isMockMode) {
+        toast.error('Failed to start unlock session. Check auth and house selection.');
+        return;
+      }
+      // Mock fallback (respect mock method order)
+      const mockMethods = mockAuthMethods
+        .filter(m => m.enabled)
+        .sort((a, b) => a.priority - b.priority)
+        .map(m => m.type);
       const mockSession: ApiUnlockSession = {
         id: crypto.randomUUID(),
         user_id: '1',

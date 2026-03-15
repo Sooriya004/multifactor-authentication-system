@@ -41,6 +41,11 @@ class FingerprintRegistrationStatus(str, enum.Enum):
     completed = "completed"
     failed = "failed"
 
+class CredentialRegistrationStatus(str, enum.Enum):
+    pending = "pending"
+    completed = "completed"
+    failed = "failed"
+
 # House entity
 class House(Base):
     __tablename__ = "houses"
@@ -117,6 +122,19 @@ class FingerprintRegistrationRequest(Base):
     requested_by_user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     fingerprint_id = Column(Integer, nullable=False, index=True)
     status = Column(SQLEnum(FingerprintRegistrationStatus), default=FingerprintRegistrationStatus.pending, nullable=False)
+    requested_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
+# Generic credential registration (RFID/Keypad) via ESP32
+class CredentialRegistrationRequest(Base):
+    __tablename__ = "credential_registration_requests"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    membership_id = Column(String, ForeignKey("house_memberships.id", ondelete="CASCADE"), nullable=False)
+    house_id = Column(String, ForeignKey("houses.id", ondelete="CASCADE"), nullable=False)
+    requested_by_user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    credential_type = Column(SQLEnum(CredentialType), nullable=False)
+    status = Column(SQLEnum(CredentialRegistrationStatus), default=CredentialRegistrationStatus.pending, nullable=False)
     requested_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     completed_at = Column(DateTime, nullable=True)
 

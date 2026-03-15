@@ -12,6 +12,8 @@ from ..models import (
     CredentialType,
     FingerprintRegistrationRequest,
     FingerprintRegistrationStatus,
+    CredentialRegistrationRequest,
+    CredentialRegistrationStatus,
     AccessLog,
     LogResult,
 )
@@ -21,6 +23,7 @@ from ..schemas import (
     AuthMethodResponse,
     AuthMethodUpdate,
     FingerprintRegisterStartResponse,
+    CredentialRegisterStartResponse,
 )
 from ..auth import get_current_active_user, get_house_id_header, get_membership
 
@@ -138,6 +141,66 @@ async def request_fingerprint_registration(
         message="Fingerprint registration requested. Please use the ESP32 scanner.",
         register_fingerprint=True,
         fingerprint_id=fingerprint_id,
+    )
+
+
+@router.post("/{cred_type}/register-request", response_model=CredentialRegisterStartResponse)
+async def request_device_credential_registration(
+    cred_type: CredentialType,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    x_house_id: Optional[str] = Depends(get_house_id_header),
+):
+    if cred_type == CredentialType.fingerprint:
+        raise HTTPException(status_code=400, detail="Use /credentials/fingerprint/register-request for fingerprints")
+    if cred_type == CredentialType.otp:
+        raise HTTPException(status_code=400, detail="OTP does not require registration")
+
+    membership = get_membership(db, current_user, x_house_id)
+
+    existing_pending = (
+        db.query(CredentialRegistrationRequest)
+        .filter(
+            CredentialRegistrationRequest.membership_id == membership.id,
+            CredentialRegistrationRequest.credential_type == cred_type,
+            CredentialRegistrationRequest.status == CredentialRegistrationStatus.pending,
+        )
+        .order_by(CredentialRegistrationRequest.requested_at.desc())
+        .first()
+    )
+    if existing_pending:
+        return CredentialRegisterStartResponse(
+            message=f"{cred_type.value.upper()} registration already pending",
+            register_credential=True,
+            credential_type=cred_type,
+            request_id=existing_pending.id,
+        )
+
+    request = CredentialRegistrationRequest(
+        membership_id=membership.id,
+        house_id=membership.house_id,
+        requested_by_user_id=current_user.id,
+        credential_type=cred_type,
+        status=CredentialRegistrationStatus.pending,
+    )
+    db.add(request)
+    db.add(
+        AccessLog(
+            user_id=current_user.id,
+            house_id=membership.house_id,
+            action=f"{cred_type.value.upper()} registration requested",
+            method="web_portal",
+            result=LogResult.success,
+            category="system",
+        )
+    )
+    db.commit()
+
+    return CredentialRegisterStartResponse(
+        message=f"{cred_type.value.upper()} registration requested. Please use the ESP32 device.",
+        register_credential=True,
+        credential_type=cred_type,
+        request_id=request.id,
     )
 
 
