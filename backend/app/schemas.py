@@ -125,6 +125,8 @@ class CredentialResponse(BaseModel):
 class AuthRequest(BaseModel):
     method_used: str
     payload: str
+    house_id: Optional[str] = None
+    session_id: Optional[str] = None
 
 class ESPAuthResponse(BaseModel):
     status: str
@@ -160,6 +162,7 @@ class DeviceCredentialCheckResponse(BaseModel):
 
 class DeviceRegisterCompleteRequest(BaseModel):
     fingerprint_id: int
+    house_id: Optional[str] = None
     success: bool = True
 
 
@@ -178,6 +181,18 @@ class DeviceCredentialCompleteResponse(BaseModel):
     status: str
     message: str
     credential_type: CredentialType
+
+class DeviceAlertRequest(BaseModel):
+    reason: str
+    method: Optional[str] = None
+    failed_attempts: Optional[int] = None
+    house_id: Optional[str] = None
+    session_id: Optional[str] = None
+    device_id: Optional[str] = None
+
+class DeviceAlertResponse(BaseModel):
+    status: str
+    message: str
 
 # Auth Method schemas
 class AuthMethodUpdate(BaseModel):

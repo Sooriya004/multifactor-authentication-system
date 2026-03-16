@@ -17,10 +17,18 @@ from ..schemas import (
     UnlockSessionResponse, UnlockSessionUpdate,
     DeviceRegisterCheckResponse, DeviceRegisterCompleteRequest, DeviceRegisterCompleteResponse,
     DeviceCredentialCheckResponse, DeviceCredentialCompleteRequest, DeviceCredentialCompleteResponse,
+    DeviceAlertRequest, DeviceAlertResponse,
 )
 from ..auth import get_current_active_user, get_house_id_header, get_membership, require_admin_membership
 
 router = APIRouter(prefix="/api", tags=["ESP32 Hardware"])
+
+TERMINAL_SESSION_STATUSES = {
+    UnlockSessionStatus.success,
+    UnlockSessionStatus.failed,
+    UnlockSessionStatus.expired,
+    UnlockSessionStatus.cancelled,
+}
 
 
 # ─── Unlock Sessions (Web → ESP32) ──────────────────────────────
@@ -55,12 +63,12 @@ def create_unlock_session(
 
     method_list = [mt.type.value for mt in methods]
     first_method = method_list[0] if method_list else None
-
     session = UnlockSession(
         user_id=current_user.id,
         house_id=m.house_id,
         status=UnlockSessionStatus.pending,
         auth_methods=json.dumps(method_list),
+        # Chained MFA starts from first method in configured priority order.
         current_method=first_method,
         expires_at=datetime.utcnow() + timedelta(minutes=2),
     )
@@ -124,8 +132,23 @@ def update_unlock_session(
     methods = json.loads(session.auth_methods)
     current_method = update.current_method or session.current_method or (methods[0] if methods else None)
 
+    if current_method and methods and current_method not in methods:
+        raise HTTPException(status_code=400, detail="Method is not enabled for this unlock session")
+
+    if session.status in TERMINAL_SESSION_STATUSES:
+        return UnlockSessionResponse(
+            id=session.id,
+            user_id=session.user_id,
+            status=session.status,
+            auth_methods=methods,
+            current_method=session.current_method,
+            created_at=session.created_at,
+            expires_at=session.expires_at,
+            completed_at=session.completed_at,
+        )
+
     if update.status == UnlockSessionStatus.success:
-        # Current method succeeded; advance if more methods remain
+        # Chained MFA: advance to next factor until all configured methods pass.
         if current_method in methods:
             idx = methods.index(current_method)
             if idx + 1 < len(methods):
@@ -140,14 +163,25 @@ def update_unlock_session(
                         user_id=session.user_id,
                         house_id=session.house_id,
                         action="door_access",
-                        method=current_method or "web_unlock",
+                        method="mfa_chain",
                         result=LogResult.success,
                         category="access",
                     )
                 )
         else:
             session.status = UnlockSessionStatus.success
+            session.current_method = current_method
             session.completed_at = datetime.utcnow()
+            db.add(
+                AccessLog(
+                    user_id=session.user_id,
+                    house_id=session.house_id,
+                    action="door_access",
+                    method="mfa_chain",
+                    result=LogResult.success,
+                    category="access",
+                )
+            )
     elif update.status == UnlockSessionStatus.failed:
         session.status = UnlockSessionStatus.failed
         session.current_method = current_method
@@ -157,7 +191,7 @@ def update_unlock_session(
                 user_id=session.user_id,
                 house_id=session.house_id,
                 action="door_access",
-                method=current_method or "web_unlock",
+                method="mfa_chain",
                 result=LogResult.failed,
                 category="access",
             )
@@ -166,6 +200,8 @@ def update_unlock_session(
         session.status = update.status
         if current_method:
             session.current_method = current_method
+        if update.status in {UnlockSessionStatus.expired, UnlockSessionStatus.cancelled}:
+            session.completed_at = datetime.utcnow()
 
     db.commit()
     db.refresh(session)
@@ -203,20 +239,22 @@ def cancel_unlock_session(
 
 
 @router.get("/unlock/pending/next")
-def get_next_pending_session(db: Session = Depends(get_db)):
+def get_next_pending_session(
+    house_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
     """
     ESP32 polls this to check if there's an unlock request waiting.
     Returns the oldest pending session or 204 if none.
     """
-    session = (
-        db.query(UnlockSession)
-        .filter(
-            UnlockSession.status == UnlockSessionStatus.pending,
-            UnlockSession.expires_at > datetime.utcnow(),
-        )
-        .order_by(UnlockSession.created_at)
-        .first()
+    query = db.query(UnlockSession).filter(
+        UnlockSession.status == UnlockSessionStatus.pending,
+        UnlockSession.expires_at > datetime.utcnow(),
     )
+    if house_id:
+        query = query.filter(UnlockSession.house_id == house_id)
+
+    session = query.order_by(UnlockSession.created_at).first()
 
     if not session:
         return {"status": "none"}
@@ -225,6 +263,7 @@ def get_next_pending_session(db: Session = Depends(get_db)):
     return {
         "status": "pending",
         "session_id": session.id,
+        "house_id": session.house_id,
         "user_name": user.full_name if user else "Unknown",
         "auth_methods": json.loads(session.auth_methods),
         "current_method": session.current_method,
@@ -234,17 +273,22 @@ def get_next_pending_session(db: Session = Depends(get_db)):
 # ─── Direct ESP32 Auth (sensor-initiated) ───────────────────────
 
 @router.get("/device/register_check", response_model=DeviceRegisterCheckResponse)
-def device_register_check(db: Session = Depends(get_db)):
+def device_register_check(
+    house_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
     """
     ESP32 polling endpoint.
     Returns the next pending fingerprint registration request, if any.
     """
-    pending = (
-        db.query(FingerprintRegistrationRequest)
-        .filter(FingerprintRegistrationRequest.status == FingerprintRegistrationStatus.pending)
-        .order_by(FingerprintRegistrationRequest.requested_at)
-        .first()
+    query = db.query(FingerprintRegistrationRequest).filter(
+        FingerprintRegistrationRequest.status == FingerprintRegistrationStatus.pending
     )
+    if house_id:
+        query = query.filter(FingerprintRegistrationRequest.house_id == house_id)
+
+    # Prefer newest request so web-triggered action appears on device immediately.
+    pending = query.order_by(FingerprintRegistrationRequest.requested_at.desc()).first()
 
     if not pending:
         return DeviceRegisterCheckResponse(register_fingerprint=False)
@@ -256,17 +300,22 @@ def device_register_check(db: Session = Depends(get_db)):
 
 
 @router.get("/device/credential_check", response_model=DeviceCredentialCheckResponse)
-def device_credential_check(db: Session = Depends(get_db)):
+def device_credential_check(
+    house_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
     """
     ESP32 polling endpoint for RFID/Keypad registration.
     Returns the next pending credential registration request, if any.
     """
-    pending = (
-        db.query(CredentialRegistrationRequest)
-        .filter(CredentialRegistrationRequest.status == CredentialRegistrationStatus.pending)
-        .order_by(CredentialRegistrationRequest.requested_at)
-        .first()
+    query = db.query(CredentialRegistrationRequest).filter(
+        CredentialRegistrationRequest.status == CredentialRegistrationStatus.pending
     )
+    if house_id:
+        query = query.filter(CredentialRegistrationRequest.house_id == house_id)
+
+    # Prefer newest request so web-triggered action appears on device immediately.
+    pending = query.order_by(CredentialRegistrationRequest.requested_at.desc()).first()
 
     if not pending:
         return DeviceCredentialCheckResponse(register_credential=False)
@@ -286,15 +335,14 @@ def device_register_complete(
     """
     ESP32 completion callback after enrolling a fingerprint template.
     """
-    pending = (
-        db.query(FingerprintRegistrationRequest)
-        .filter(
-            FingerprintRegistrationRequest.fingerprint_id == payload.fingerprint_id,
-            FingerprintRegistrationRequest.status == FingerprintRegistrationStatus.pending,
-        )
-        .order_by(FingerprintRegistrationRequest.requested_at)
-        .first()
+    query = db.query(FingerprintRegistrationRequest).filter(
+        FingerprintRegistrationRequest.fingerprint_id == payload.fingerprint_id,
+        FingerprintRegistrationRequest.status == FingerprintRegistrationStatus.pending,
     )
+    if payload.house_id:
+        query = query.filter(FingerprintRegistrationRequest.house_id == payload.house_id)
+
+    pending = query.order_by(FingerprintRegistrationRequest.requested_at.desc()).first()
     if not pending:
         raise HTTPException(status_code=404, detail="No pending registration found for fingerprint ID")
 
@@ -428,38 +476,65 @@ def device_credential_complete(
 @router.post("/auth/verify", response_model=ESPAuthResponse)
 def verify_authentication(request: AuthRequest, db: Session = Depends(get_db)):
     """
-    ESP32 endpoint — receives method + payload from sensors,
+    ESP32 endpoint - receives method + payload from sensors,
     verifies against the database, logs the attempt, returns unlock/none.
     """
     method_used = request.method_used.strip().lower()
+    normalized_method = "keypad" if method_used == "pin" else method_used
+    session = None
+
+    if normalized_method not in {"rfid", "fingerprint", "keypad", "otp"}:
+        raise HTTPException(status_code=400, detail="Unsupported auth method")
+
+    if request.session_id:
+        session = db.query(UnlockSession).filter(UnlockSession.id == request.session_id).first()
+        if not session:
+            raise HTTPException(status_code=404, detail="Unlock session not found")
+
+        if session.status in TERMINAL_SESSION_STATUSES:
+            return {"status": "failure", "action": "none"}
+
+        allowed_methods = set(json.loads(session.auth_methods))
+        if normalized_method not in allowed_methods:
+            return {"status": "failure", "action": "none"}
+
+        expected_method = session.current_method or (json.loads(session.auth_methods)[0] if session.auth_methods else None)
+        if expected_method and normalized_method != expected_method:
+            return {"status": "failure", "action": "none"}
+
+    house_scope = session.house_id if session else request.house_id
+    log_user_id = session.user_id if session else "system"
+    should_log_direct = session is None
 
     if method_used == "otp":
         valid_otp = db.query(OTPCode).filter(OTPCode.code == request.payload).first()
         if valid_otp and datetime.utcnow() < valid_otp.expires_at:
-            db.add(
-                AccessLog(
-                    user_id="system",
-                    house_id=None,
-                    action="door_access",
-                    method="otp",
-                    result=LogResult.success,
-                    category="access",
+            if should_log_direct:
+                db.add(
+                    AccessLog(
+                        user_id=log_user_id,
+                        house_id=house_scope,
+                        action="door_access",
+                        method="otp",
+                        result=LogResult.success,
+                        category="access",
+                    )
                 )
-            )
             db.delete(valid_otp)
             db.commit()
             return {"status": "success", "action": "unlock"}
 
-        db.add(
-            AccessLog(
-                user_id="system",
-                house_id=None,
-                action="door_access",
-                method="otp",
-                result=LogResult.failed,
-                category="access",
+        if should_log_direct:
+            db.add(
+                AccessLog(
+                    user_id=log_user_id,
+                    house_id=house_scope,
+                    action="door_access",
+                    method="otp",
+                    result=LogResult.failed,
+                    category="access",
+                )
             )
-        )
         db.commit()
         return {"status": "failure", "action": "none"}
 
@@ -469,76 +544,124 @@ def verify_authentication(request: AuthRequest, db: Session = Depends(get_db)):
     elif method_used in {"keypad", "fingerprint", "rfid"}:
         credential_type = CredentialType(method_used)
         log_method = method_used
-    else:
-        raise HTTPException(status_code=400, detail="Unsupported auth method")
 
-    valid_cred = (
+    cred_query = (
         db.query(Credential)
+        .join(HouseMembership, Credential.membership_id == HouseMembership.id)
         .filter(
             Credential.type == credential_type,
             Credential.credential_value == request.payload,
             Credential.registered == True,  # noqa: E712
         )
-        .first()
     )
+    if session:
+        cred_query = cred_query.filter(HouseMembership.user_id == session.user_id)
+        if session.house_id:
+            cred_query = cred_query.filter(HouseMembership.house_id == session.house_id)
+    elif request.house_id:
+        cred_query = cred_query.filter(HouseMembership.house_id == request.house_id)
+
+    valid_cred = cred_query.first()
 
     if valid_cred:
         membership = db.query(HouseMembership).filter(HouseMembership.id == valid_cred.membership_id).first()
         if membership:
             if membership.status == UserStatus.blocked:
-                db.add(
-                    AccessLog(
-                        user_id=membership.user_id,
-                        house_id=membership.house_id,
-                        action="door_access",
-                        method=log_method,
-                        result=LogResult.failed,
-                        category="access",
+                if should_log_direct:
+                    db.add(
+                        AccessLog(
+                            user_id=membership.user_id,
+                            house_id=membership.house_id,
+                            action="door_access",
+                            method=log_method,
+                            result=LogResult.failed,
+                            category="access",
+                        )
                     )
-                )
                 db.commit()
                 return {"status": "failure", "action": "none"}
 
             house = db.query(House).filter(House.id == membership.house_id).first()
             if house and house.lockdown:
+                if should_log_direct:
+                    db.add(
+                        AccessLog(
+                            user_id=membership.user_id,
+                            house_id=membership.house_id,
+                            action="door_access",
+                            method=log_method,
+                            result=LogResult.failed,
+                            category="access",
+                        )
+                    )
+                db.commit()
+                return {"status": "failure", "action": "none"}
+
+            if should_log_direct:
                 db.add(
                     AccessLog(
                         user_id=membership.user_id,
                         house_id=membership.house_id,
                         action="door_access",
                         method=log_method,
-                        result=LogResult.failed,
+                        result=LogResult.success,
                         category="access",
                     )
                 )
-                db.commit()
-                return {"status": "failure", "action": "none"}
-
-            db.add(
-                AccessLog(
-                    user_id=membership.user_id,
-                    house_id=membership.house_id,
-                    action="door_access",
-                    method=log_method,
-                    result=LogResult.success,
-                    category="access",
-                )
-            )
             db.commit()
             return {"status": "success", "action": "unlock"}
 
+    if should_log_direct:
+        db.add(
+            AccessLog(
+                user_id=log_user_id,
+                house_id=house_scope,
+                action="door_access",
+                method=log_method,
+                result=LogResult.failed,
+                category="access",
+            )
+        )
+    db.commit()
+    return {"status": "failure", "action": "none"}
+
+
+@router.post("/device/alert", response_model=DeviceAlertResponse)
+def create_device_alert(
+    payload: DeviceAlertRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    ESP32 alert endpoint for lockout/security events.
+    Used when failed attempts exceed threshold and buzzer is triggered.
+    """
+    house_id = payload.house_id
+    user_id = "system"
+
+    if payload.session_id:
+        session = db.query(UnlockSession).filter(UnlockSession.id == payload.session_id).first()
+        if session:
+            house_id = session.house_id
+            user_id = session.user_id
+
+    action = payload.reason.strip() or "Device security alert"
+    if payload.failed_attempts is not None:
+        action = f"{action} (failed_attempts={payload.failed_attempts})"
+
     db.add(
         AccessLog(
-            user_id="system",
-            house_id=None,
-            action="door_access",
-            method=log_method,
-            result=LogResult.failed,
-            category="access",
+            user_id=user_id,
+            house_id=house_id,
+            action=action[:100],
+            method=payload.method or "device",
+            result=LogResult.alert,
+            category="system",
+            device_id=payload.device_id,
         )
     )
     db.commit()
-    return {"status": "failure", "action": "none"}
+
+    return DeviceAlertResponse(status="success", message="Alert logged")
 
 
 @router.get("/otp/generate", response_model=OTPResponse)

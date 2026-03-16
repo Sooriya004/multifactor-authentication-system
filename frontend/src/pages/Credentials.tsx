@@ -22,7 +22,7 @@ function toApiCred(m: typeof mockCredentials[0]): ApiCredential {
 }
 
 const Credentials = () => {
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, isMockMode } = useAuth();
   const [credentials, setCredentials] = useState<ApiCredential[]>([]);
   const [loading, setLoading] = useState(true);
   const [registerType, setRegisterType] = useState<string | null>(null);
@@ -49,11 +49,7 @@ const Credentials = () => {
     if (!registerType) return;
     setSubmitting(true);
     if (isMock) {
-      setCredentials(c => c.map(cr => cr.type === registerType
-        ? { ...cr, registered: true, registered_at: new Date().toISOString(), has_credential_value: true }
-        : cr
-      ));
-      toast.success('Registration requested. Complete it on ESP32.');
+      toast.error('Backend is offline (mock mode). ESP32 will not receive registration requests.');
       setRegisterType(null);
       setSubmitting(false);
       return;
@@ -79,11 +75,7 @@ const Credentials = () => {
 
   const handleUnregister = async (type: string) => {
     if (isMock) {
-      setCredentials(c => c.map(cr => cr.type === type
-        ? { ...cr, registered: false, registered_at: null, has_credential_value: false }
-        : cr
-      ));
-      toast.success('Credential unregistered');
+      toast.error('Backend is offline (mock mode). Unable to sync credential changes.');
       return;
     }
     try {
@@ -102,6 +94,11 @@ const Credentials = () => {
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
           <h1 className="text-3xl font-bold text-foreground mb-2">Register Credentials</h1>
           <p className="text-muted-foreground mb-8">Manage your authentication credentials for access control. Register via your ESP32 device.</p>
+          {(isMock || isMockMode) && (
+            <div className="mb-6 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+              Backend connection not available. Registration/unregistration here will not trigger ESP32 actions.
+            </div>
+          )}
 
           {loading ? (
             <div className="flex items-center justify-center py-12">
@@ -146,7 +143,10 @@ const Credentials = () => {
                       </div>
                     ) : (
                       <Button size="sm" className="gradient-primary text-primary-foreground gap-1"
-                        onClick={() => setRegisterType(cred.type)}>
+                        onClick={() => {
+                          setRegisterType(cred.type);
+                          toast.info('Click "Start Registration" in the popup to send request to ESP32');
+                        }}>
                         <Plus className="w-4 h-4" /> Register
                       </Button>
                     )}
