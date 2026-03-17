@@ -9,14 +9,16 @@ from ..database import get_db
 from ..models import (
     Credential, AccessLog, OTPCode, User, AuthMethod, House,
     HouseMembership, CredentialType, LogResult, UnlockSession, UnlockSessionStatus,
-    UserStatus, FingerprintRegistrationRequest, FingerprintRegistrationStatus,
+    UserStatus, FingerprintRegistrationRequest, RFIDRegistrationRequest, FingerprintRegistrationStatus,
 )
 from ..schemas import (
     AuthRequest, OTPResponse, ESPAuthResponse,
     UnlockSessionResponse, UnlockSessionUpdate,
-    DeviceRegisterCheckResponse, DeviceRegisterCompleteRequest, DeviceRegisterCompleteResponse,
+    DeviceRegisterCompleteRequest, DeviceRegisterCompleteResponse,
+    DeviceRFIDRegisterCompleteRequest,
 )
 from ..auth import get_current_active_user, get_house_id_header, get_membership, require_admin_membership
+from ..credential_utils import normalize_rfid_tag
 
 router = APIRouter(prefix="/api", tags=["ESP32 Hardware"])
 
@@ -200,26 +202,19 @@ def get_next_pending_session(db: Session = Depends(get_db)):
 
 # ─── Direct ESP32 Auth (sensor-initiated) ───────────────────────
 
-@router.get("/device/register_check", response_model=DeviceRegisterCheckResponse)
+@router.get("/device/register_check")
 def device_register_check(db: Session = Depends(get_db)):
     """
-    ESP32 polling endpoint.
-    Returns the next pending fingerprint registration request, if any.
+    RFID registration trigger endpoint.
     """
-    pending = (
-        db.query(FingerprintRegistrationRequest)
-        .filter(FingerprintRegistrationRequest.status == FingerprintRegistrationStatus.pending)
-        .order_by(FingerprintRegistrationRequest.requested_at)
+    pending_rfid = (
+        db.query(RFIDRegistrationRequest)
+        .filter(RFIDRegistrationRequest.status == FingerprintRegistrationStatus.pending)
+        .order_by(RFIDRegistrationRequest.requested_at)
         .first()
     )
 
-    if not pending:
-        return DeviceRegisterCheckResponse(register_fingerprint=False)
-
-    return DeviceRegisterCheckResponse(
-        register_fingerprint=True,
-        fingerprint_id=pending.fingerprint_id,
-    )
+    return {"register_rfid": bool(pending_rfid)}
 
 
 @router.post("/device/register_complete", response_model=DeviceRegisterCompleteResponse)
@@ -295,121 +290,102 @@ def device_register_complete(
     )
 
 
-@router.post("/auth/verify", response_model=ESPAuthResponse)
-def verify_authentication(request: AuthRequest, db: Session = Depends(get_db)):
+@router.post("/device/rfid/register_complete")
+def device_rfid_register_complete(
+    payload: DeviceRFIDRegisterCompleteRequest,
+    db: Session = Depends(get_db),
+):
     """
-    ESP32 endpoint — receives method + payload from sensors,
-    verifies against the database, logs the attempt, returns unlock/none.
+    ESP32 completion callback after scanning an RFID tag for registration.
     """
-    method_used = request.method_used.strip().lower()
-
-    if method_used == "otp":
-        valid_otp = db.query(OTPCode).filter(OTPCode.code == request.payload).first()
-        if valid_otp and datetime.utcnow() < valid_otp.expires_at:
-            db.add(
-                AccessLog(
-                    user_id="system",
-                    house_id=None,
-                    action="door_access",
-                    method="otp",
-                    result=LogResult.success,
-                    category="access",
-                )
-            )
-            db.delete(valid_otp)
-            db.commit()
-            return {"status": "success", "action": "unlock"}
-
-        db.add(
-            AccessLog(
-                user_id="system",
-                house_id=None,
-                action="door_access",
-                method="otp",
-                result=LogResult.failed,
-                category="access",
-            )
-        )
-        db.commit()
-        return {"status": "failure", "action": "none"}
-
-    if method_used == "pin":
-        credential_type = CredentialType.keypad
-        log_method = "pin"
-    elif method_used in {"keypad", "fingerprint", "rfid"}:
-        credential_type = CredentialType(method_used)
-        log_method = method_used
-    else:
-        raise HTTPException(status_code=400, detail="Unsupported auth method")
-
-    valid_cred = (
-        db.query(Credential)
-        .filter(
-            Credential.type == credential_type,
-            Credential.credential_value == request.payload,
-            Credential.registered == True,  # noqa: E712
-        )
+    normalized_tag = normalize_rfid_tag(payload.tag_uid)
+    pending = (
+        db.query(RFIDRegistrationRequest)
+        .filter(RFIDRegistrationRequest.status == FingerprintRegistrationStatus.pending)
+        .order_by(RFIDRegistrationRequest.requested_at)
         .first()
     )
 
-    if valid_cred:
-        membership = db.query(HouseMembership).filter(HouseMembership.id == valid_cred.membership_id).first()
-        if membership:
-            if membership.status == UserStatus.blocked:
-                db.add(
-                    AccessLog(
-                        user_id=membership.user_id,
-                        house_id=membership.house_id,
-                        action="door_access",
-                        method=log_method,
-                        result=LogResult.failed,
-                        category="access",
-                    )
-                )
-                db.commit()
-                return {"status": "failure", "action": "none"}
+    if pending:
+        pending.completed_at = datetime.utcnow()
 
-            house = db.query(House).filter(House.id == membership.house_id).first()
-            if house and house.lockdown:
-                db.add(
-                    AccessLog(
-                        user_id=membership.user_id,
-                        house_id=membership.house_id,
-                        action="door_access",
-                        method=log_method,
-                        result=LogResult.failed,
-                        category="access",
-                    )
-                )
-                db.commit()
-                return {"status": "failure", "action": "none"}
+        if payload.success and normalized_tag:
+            pending.status = FingerprintRegistrationStatus.completed
+            pending.tag_uid = normalized_tag
 
-            db.add(
-                AccessLog(
-                    user_id=membership.user_id,
-                    house_id=membership.house_id,
-                    action="door_access",
-                    method=log_method,
-                    result=LogResult.success,
-                    category="access",
+            credential = (
+                db.query(Credential)
+                .filter(
+                    Credential.membership_id == pending.membership_id,
+                    Credential.type == CredentialType.rfid,
                 )
+                .first()
             )
+            if not credential:
+                credential = Credential(
+                    membership_id=pending.membership_id,
+                    type=CredentialType.rfid,
+                )
+                db.add(credential)
+
+            credential.credential_value = normalized_tag
+            credential.data = payload.tag_uid.strip()
+            credential.registered = True
+            credential.registered_at = datetime.utcnow()
+        else:
+            # Keep "ignore" behavior for UID storage, but close the pending request.
+            pending.status = FingerprintRegistrationStatus.failed
+            if normalized_tag:
+                pending.tag_uid = normalized_tag
+
+        db.commit()
+
+    return {"status": "stored"}
+
+
+@router.post("/auth/verify", response_model=ESPAuthResponse)
+def verify_authentication(request: AuthRequest, db: Session = Depends(get_db)):
+    method_used = request.method_used.strip().lower()
+    payload = request.payload.strip()
+
+    if method_used == "keypad":
+        valid_pin = (
+            db.query(Credential)
+            .filter(
+                Credential.type == CredentialType.keypad,
+                Credential.credential_value == payload,
+                Credential.registered == True,  # noqa: E712
+            )
+            .first()
+        )
+        if valid_pin:
+            return {"status": "success", "action": "unlock"}
+        return {"status": "failure", "action": "none"}
+
+    if method_used == "otp":
+        valid_otp = db.query(OTPCode).filter(OTPCode.code == payload).first()
+        if valid_otp and datetime.utcnow() < valid_otp.expires_at:
+            db.delete(valid_otp)
             db.commit()
             return {"status": "success", "action": "unlock"}
+        return {"status": "failure", "action": "none"}
 
-    db.add(
-        AccessLog(
-            user_id="system",
-            house_id=None,
-            action="door_access",
-            method=log_method,
-            result=LogResult.failed,
-            category="access",
+    if method_used == "rfid":
+        normalized_payload = normalize_rfid_tag(payload)
+        valid_rfid = (
+            db.query(Credential)
+            .filter(
+                Credential.type == CredentialType.rfid,
+                Credential.credential_value == normalized_payload,
+                Credential.registered == True,  # noqa: E712
+            )
+            .first()
         )
-    )
-    db.commit()
-    return {"status": "failure", "action": "none"}
+        if valid_rfid:
+            return {"status": "success", "action": "unlock"}
+        return {"status": "failure", "action": "none"}
 
+    return {"status": "failure", "action": "none"}
 
 @router.get("/otp/generate", response_model=OTPResponse)
 def generate_otp(

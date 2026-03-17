@@ -120,6 +120,19 @@ class FingerprintRegistrationRequest(Base):
     requested_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     completed_at = Column(DateTime, nullable=True)
 
+
+class RFIDRegistrationRequest(Base):
+    __tablename__ = "rfid_registration_requests"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    membership_id = Column(String, ForeignKey("house_memberships.id", ondelete="CASCADE"), nullable=False)
+    house_id = Column(String, ForeignKey("houses.id", ondelete="CASCADE"), nullable=False)
+    requested_by_user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    tag_uid = Column(String(120), nullable=True)
+    status = Column(SQLEnum(FingerprintRegistrationStatus), default=FingerprintRegistrationStatus.pending, nullable=False)
+    requested_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+
 # Authentication Method preferences — per-membership
 class AuthMethod(Base):
     __tablename__ = "auth_methods"

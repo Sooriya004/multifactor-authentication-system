@@ -11,6 +11,7 @@ from ..models import (
     AuthMethod,
     CredentialType,
     FingerprintRegistrationRequest,
+    RFIDRegistrationRequest,
     FingerprintRegistrationStatus,
     AccessLog,
     LogResult,
@@ -21,8 +22,10 @@ from ..schemas import (
     AuthMethodResponse,
     AuthMethodUpdate,
     FingerprintRegisterStartResponse,
+    RFIDRegisterStartResponse,
 )
 from ..auth import get_current_active_user, get_house_id_header, get_membership
+from ..credential_utils import normalize_rfid_tag
 
 router = APIRouter(prefix="/credentials", tags=["Credentials & Auth Methods"])
 
@@ -141,6 +144,54 @@ async def request_fingerprint_registration(
     )
 
 
+@router.post("/rfid/register-request", response_model=RFIDRegisterStartResponse)
+async def request_rfid_registration(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    x_house_id: Optional[str] = Depends(get_house_id_header),
+):
+    membership = get_membership(db, current_user, x_house_id)
+
+    existing_pending = (
+        db.query(RFIDRegistrationRequest)
+        .filter(
+            RFIDRegistrationRequest.membership_id == membership.id,
+            RFIDRegistrationRequest.status == FingerprintRegistrationStatus.pending,
+        )
+        .order_by(RFIDRegistrationRequest.requested_at.desc())
+        .first()
+    )
+    if existing_pending:
+        return RFIDRegisterStartResponse(
+            message="RFID registration already pending",
+            register_rfid=True,
+        )
+
+    request = RFIDRegistrationRequest(
+        membership_id=membership.id,
+        house_id=membership.house_id,
+        requested_by_user_id=current_user.id,
+        status=FingerprintRegistrationStatus.pending,
+    )
+    db.add(request)
+    db.add(
+        AccessLog(
+            user_id=current_user.id,
+            house_id=membership.house_id,
+            action="RFID registration requested",
+            method="web_portal",
+            result=LogResult.success,
+            category="system",
+        )
+    )
+    db.commit()
+
+    return RFIDRegisterStartResponse(
+        message="RFID registration requested. Please scan your RFID tag on the ESP32 reader.",
+        register_rfid=True,
+    )
+
+
 @router.post("/{cred_type}/register", response_model=CredentialResponse)
 async def register_credential(
     cred_type: CredentialType,
@@ -164,8 +215,16 @@ async def register_credential(
         credential = Credential(membership_id=mid, type=cred_type)
         db.add(credential)
 
-    credential.data = cred_data.data
-    credential.credential_value = cred_data.credential_value
+    if cred_type == CredentialType.rfid:
+        raw_tag = (cred_data.credential_value or cred_data.data or "").strip()
+        normalized_tag = normalize_rfid_tag(raw_tag)
+        if not normalized_tag:
+            raise HTTPException(status_code=400, detail="RFID tag UID is required")
+        credential.data = raw_tag
+        credential.credential_value = normalized_tag
+    else:
+        credential.data = cred_data.data
+        credential.credential_value = cred_data.credential_value
     credential.registered = True
     credential.registered_at = datetime.utcnow()
 

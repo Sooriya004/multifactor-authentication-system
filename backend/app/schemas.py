@@ -140,9 +140,15 @@ class FingerprintRegisterStartResponse(BaseModel):
     fingerprint_id: int
 
 
+class RFIDRegisterStartResponse(BaseModel):
+    message: str
+    register_rfid: bool
+
+
 class DeviceRegisterCheckResponse(BaseModel):
-    register_fingerprint: bool
+    register_fingerprint: bool = False
     fingerprint_id: Optional[int] = None
+    register_rfid: bool = False
 
 
 class DeviceRegisterCompleteRequest(BaseModel):
@@ -154,6 +160,17 @@ class DeviceRegisterCompleteResponse(BaseModel):
     status: str
     message: str
     fingerprint_id: int
+
+
+class DeviceRFIDRegisterCompleteRequest(BaseModel):
+    tag_uid: str
+    success: bool = True
+
+
+class DeviceRFIDRegisterCompleteResponse(BaseModel):
+    status: str
+    message: str
+    tag_uid: str
 
 # Auth Method schemas
 class AuthMethodUpdate(BaseModel):

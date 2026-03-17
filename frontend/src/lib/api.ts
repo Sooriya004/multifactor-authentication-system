@@ -111,6 +111,11 @@ export interface ApiFingerprintRegisterStart {
   fingerprint_id: number;
 }
 
+export interface ApiRFIDRegisterStart {
+  message: string;
+  register_rfid: boolean;
+}
+
 export interface ApiAuthMethod {
   id: string;
   type: 'rfid' | 'fingerprint' | 'keypad' | 'otp';
@@ -259,6 +264,11 @@ export const credentialsApi = {
 
   requestFingerprintRegistration: () =>
     apiFetch<ApiFingerprintRegisterStart>('/credentials/fingerprint/register-request', {
+      method: 'POST',
+    }),
+
+  requestRFIDRegistration: () =>
+    apiFetch<ApiRFIDRegisterStart>('/credentials/rfid/register-request', {
       method: 'POST',
     }),
 

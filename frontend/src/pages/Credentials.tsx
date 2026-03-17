@@ -45,11 +45,19 @@ const Credentials = () => {
 
   useEffect(() => { fetchCredentials(); }, []);
 
+  useEffect(() => {
+    if (isMock) return;
+    const timer = setInterval(() => {
+      fetchCredentials();
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [isMock]);
+
   if (!isAuthenticated || !user) return <Navigate to="/signin" />;
 
   const handleRegister = async () => {
     if (!registerType) return;
-    if (registerType !== 'fingerprint' && !formValue.trim()) {
+    if (registerType === 'keypad' && !formValue.trim()) {
       toast.error('Please enter a value');
       return;
     }
@@ -62,6 +70,8 @@ const Credentials = () => {
       ));
       if (registerType === 'fingerprint') {
         toast.success('Fingerprint registration requested. Complete it on ESP32.');
+      } else if (registerType === 'rfid') {
+        toast.success('RFID registration requested. Scan your RFID tag on ESP32.');
       } else {
         toast.success(`${credentialMeta[registerType]?.label} registered successfully`);
       }
@@ -75,6 +85,9 @@ const Credentials = () => {
       if (registerType === 'fingerprint') {
         const response = await credentialsApi.requestFingerprintRegistration();
         toast.success(`${response.message} Assigned ID: ${response.fingerprint_id}`);
+      } else if (registerType === 'rfid') {
+        const response = await credentialsApi.requestRFIDRegistration();
+        toast.success(response.message);
       } else {
         await credentialsApi.register(registerType, formValue, formValue);
         toast.success(`${credentialMeta[registerType]?.label || registerType} registered successfully`);
@@ -178,17 +191,17 @@ const Credentials = () => {
           </DialogHeader>
           <div className="space-y-4">
             <p className="text-sm text-muted-foreground">
-              {registerType === 'rfid' && 'Scan your RFID tag on the ESP32 reader, then enter the Tag ID shown on the OLED display.'}
-              {registerType === 'fingerprint' && 'This will enable fingerprint enrollment on ESP32. After you click Register, place your finger on the sensor when prompted on the device screen.'}
+              {registerType === 'rfid' && 'This will enable RFID enrollment on ESP32. After you click Start Registration, scan the tag on the ESP32 reader.'}
+              {registerType === 'fingerprint' && 'This will enable fingerprint enrollment on ESP32. After you click Start Registration, place your finger on the sensor when prompted on the device screen.'}
               {registerType === 'keypad' && 'Choose a secure PIN/password you\'ll enter on the ESP32 keypad.'}
             </p>
-            {registerType !== 'fingerprint' && (
+            {registerType === 'keypad' && (
               <div className="space-y-2">
                 <Label className="text-foreground">
-                  {registerType === 'rfid' ? 'RFID Tag ID' : 'Keypad Password'}
+                  Keypad Password
                 </Label>
                 <Input
-                  placeholder={registerType === 'rfid' ? 'e.g. A1:B2:C3:D4' : 'Enter PIN'}
+                  placeholder="Enter PIN"
                   value={formValue}
                   onChange={e => setFormValue(e.target.value)}
                   className="bg-secondary border-border"
@@ -199,7 +212,7 @@ const Credentials = () => {
           <DialogFooter>
             <Button variant="ghost" onClick={() => setRegisterType(null)}>Cancel</Button>
             <Button onClick={handleRegister} disabled={submitting} className="gradient-primary text-primary-foreground">
-              {submitting ? 'Registering...' : registerType === 'fingerprint' ? 'Start Registration' : 'Register'}
+              {submitting ? 'Registering...' : registerType === 'keypad' ? 'Register' : 'Start Registration'}
             </Button>
           </DialogFooter>
         </DialogContent>

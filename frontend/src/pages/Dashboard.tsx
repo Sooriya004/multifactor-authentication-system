@@ -11,6 +11,7 @@ import ESPStatus from '@/components/ESPStatus';
 import EmergencyUnlock from '@/components/EmergencyUnlock';
 import EmergencyLock from '@/components/EmergencyLock';
 import SelfBlockButton from '@/components/SelfBlockButton';
+import OTPPanel from '@/components/OTPPanel';
 import { Navigate } from 'react-router-dom';
 
 const Dashboard = () => {
@@ -65,9 +66,10 @@ const Dashboard = () => {
 
           {/* Action widgets */}
           {isAdmin ? (
-            <div className={`grid gap-4 mb-8 ${isPrimaryAdmin ? 'md:grid-cols-4' : 'md:grid-cols-3'}`}>
+            <div className={`grid gap-4 mb-8 ${isPrimaryAdmin ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
               <ESPStatus />
               <UnlockDoor />
+              <OTPPanel />
               <EmergencyUnlock />
               {isPrimaryAdmin && <EmergencyLock />}
             </div>
