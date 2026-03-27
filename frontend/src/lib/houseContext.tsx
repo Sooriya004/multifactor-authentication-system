@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import { setActiveHouseId } from './api';
 
 export interface HouseInfo {
   id: string;
@@ -37,12 +38,21 @@ export const HouseProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const savedId = localStorage.getItem(ACTIVE_HOUSE_KEY);
     const saved = newHouses.find(h => h.id === savedId && h.status === 'active');
     const firstActive = newHouses.find(h => h.status === 'active');
-    setActiveHouseState(saved || firstActive || newHouses[0] || null);
+    const resolved = saved || firstActive || newHouses[0] || null;
+    setActiveHouseState(resolved);
+    if (resolved) {
+      localStorage.setItem(ACTIVE_HOUSE_KEY, resolved.id);
+      setActiveHouseId(resolved.id);
+    } else {
+      localStorage.removeItem(ACTIVE_HOUSE_KEY);
+      setActiveHouseId(null);
+    }
   }, []);
 
   const setActiveHouse = useCallback((house: HouseInfo) => {
     setActiveHouseState(house);
     localStorage.setItem(ACTIVE_HOUSE_KEY, house.id);
+    setActiveHouseId(house.id);
   }, []);
 
   return (

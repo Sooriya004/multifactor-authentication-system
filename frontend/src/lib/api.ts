@@ -145,15 +145,20 @@ export interface ApiESPStatus {
   message: string;
 }
 
-export interface ApiUnlockSession {
-  id: string;
-  user_id: string;
-  status: 'pending' | 'authenticating' | 'success' | 'failed' | 'expired' | 'cancelled';
-  auth_methods: string[];
-  current_method: string | null;
-  created_at: string;
-  expires_at: string;
-  completed_at: string | null;
+export interface ApiDeviceConfig {
+  order: Array<'rfid' | 'fingerprint' | 'keypad' | 'otp'>;
+}
+
+export interface ApiVerifyRequest {
+  method_used: 'rfid' | 'fingerprint' | 'keypad' | 'otp';
+  payload: string;
+  step: number;
+  session_id?: string;
+}
+
+export interface ApiVerifyResponse {
+  status: 'success' | 'failure' | 'authenticating';
+  session_id?: string;
 }
 
 // ─── Auth ───────────────────────────────────────────────────────
@@ -283,21 +288,20 @@ export const credentialsApi = {
 
 // ─── ESP32 / Hardware ───────────────────────────────────────────
 export const espApi = {
+  getDeviceConfig: () => apiFetch<ApiDeviceConfig>('/api/device/config'),
+
+  verifyFactor: (payload: ApiVerifyRequest) =>
+    apiFetch<ApiVerifyResponse>('/api/auth/verify', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
   generateOTP: () => apiFetch<ApiOTP>('/api/otp/generate'),
 
   getStatus: () => apiFetch<ApiESPStatus>('/api/esp/status'),
 
   emergencyUnlock: () =>
     apiFetch<{ status: string; action: string }>('/api/esp/emergency-unlock', { method: 'POST' }),
-
-  requestUnlock: () =>
-    apiFetch<ApiUnlockSession>('/api/unlock/request', { method: 'POST' }),
-
-  getUnlockSession: (sessionId: string) =>
-    apiFetch<ApiUnlockSession>(`/api/unlock/${sessionId}`),
-
-  cancelUnlock: (sessionId: string) =>
-    apiFetch<{ message: string }>(`/api/unlock/${sessionId}/cancel`, { method: 'POST' }),
 
   getLockdownStatus: () =>
     apiFetch<{ lockdown: boolean; lockdown_by: string | null; lockdown_at: string | null }>('/api/house/lockdown'),

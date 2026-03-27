@@ -120,14 +120,6 @@ class CredentialResponse(BaseModel):
         from_attributes = True
 
 # ESP32 schemas
-class AuthRequest(BaseModel):
-    method_used: str
-    payload: str
-
-class ESPAuthResponse(BaseModel):
-    status: str
-    action: str
-
 class OTPResponse(BaseModel):
     status: str
     otp: str
@@ -145,12 +137,6 @@ class RFIDRegisterStartResponse(BaseModel):
     register_rfid: bool
 
 
-class DeviceRegisterCheckResponse(BaseModel):
-    register_fingerprint: bool = False
-    fingerprint_id: Optional[int] = None
-    register_rfid: bool = False
-
-
 class DeviceRegisterCompleteRequest(BaseModel):
     fingerprint_id: int
     success: bool = True
@@ -165,12 +151,6 @@ class DeviceRegisterCompleteResponse(BaseModel):
 class DeviceRFIDRegisterCompleteRequest(BaseModel):
     tag_uid: str
     success: bool = True
-
-
-class DeviceRFIDRegisterCompleteResponse(BaseModel):
-    status: str
-    message: str
-    tag_uid: str
 
 # Auth Method schemas
 class AuthMethodUpdate(BaseModel):
@@ -232,28 +212,3 @@ class UserRoleUpdate(BaseModel):
 class UserStatusUpdate(BaseModel):
     status: UserStatus
 
-# Unlock Session schemas
-class UnlockSessionStatus(str, Enum):
-    pending = "pending"
-    authenticating = "authenticating"
-    success = "success"
-    failed = "failed"
-    expired = "expired"
-    cancelled = "cancelled"
-
-class UnlockSessionResponse(BaseModel):
-    id: str
-    user_id: str
-    status: UnlockSessionStatus
-    auth_methods: List[str]
-    current_method: Optional[str] = None
-    created_at: datetime
-    expires_at: datetime
-    completed_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
-
-class UnlockSessionUpdate(BaseModel):
-    status: UnlockSessionStatus
-    current_method: Optional[str] = None

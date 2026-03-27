@@ -1,20 +1,37 @@
+"""
+ESP32 Hardware Router - Handles device registration and OTP generation.
+
+Endpoints for:
+- Device registration (fingerprint, RFID)
+- OTP generation
+- ESP32 status/health checks
+- Lockdown management
+- Emergency unlock
+"""
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from typing import Optional
 import random
-import json
 
 from ..database import get_db
 from ..models import (
-    Credential, AccessLog, OTPCode, User, AuthMethod, House,
-    HouseMembership, CredentialType, LogResult, UnlockSession, UnlockSessionStatus,
-    UserStatus, FingerprintRegistrationRequest, RFIDRegistrationRequest, FingerprintRegistrationStatus,
+    Credential,
+    AccessLog,
+    OTPCode,
+    User,
+    House,
+    HouseMembership,
+    CredentialType,
+    LogResult,
+    RegistrationRequest,
+    RegistrationStatus,
 )
 from ..schemas import (
-    AuthRequest, OTPResponse, ESPAuthResponse,
-    UnlockSessionResponse, UnlockSessionUpdate,
-    DeviceRegisterCompleteRequest, DeviceRegisterCompleteResponse,
+    OTPResponse,
+    DeviceRegisterCompleteRequest,
+    DeviceRegisterCompleteResponse,
     DeviceRFIDRegisterCompleteRequest,
 )
 from ..auth import get_current_active_user, get_house_id_header, get_membership, require_admin_membership
@@ -23,198 +40,41 @@ from ..credential_utils import normalize_rfid_tag
 router = APIRouter(prefix="/api", tags=["ESP32 Hardware"])
 
 
-# ─── Unlock Sessions (Web → ESP32) ──────────────────────────────
-
-@router.post("/unlock/request", response_model=UnlockSessionResponse)
-def create_unlock_session(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-    x_house_id: Optional[str] = Depends(get_house_id_header),
-):
-    """
-    User clicks 'Unlock Door' on the web app.
-    Creates a session the ESP32 polls for and begins the auth sequence.
-    """
-    m = get_membership(db, current_user, x_house_id)
-
-    # Check lockdown
-    house = db.query(House).filter(House.id == m.house_id).first()
-    if house and house.lockdown:
-        raise HTTPException(status_code=403, detail="House is in lockdown. All access is blocked.")
-
-    # Get user's enabled auth methods in priority order (per membership)
-    methods = (
-        db.query(AuthMethod)
-        .filter(AuthMethod.membership_id == m.id, AuthMethod.enabled == True)
-        .order_by(AuthMethod.priority)
-        .all()
-    )
-
-    if not methods:
-        raise HTTPException(status_code=400, detail="No authentication methods enabled. Configure them in Auth Settings.")
-
-    method_list = [mt.type.value for mt in methods]
-
-    session = UnlockSession(
-        user_id=current_user.id,
-        house_id=m.house_id,
-        status=UnlockSessionStatus.pending,
-        auth_methods=json.dumps(method_list),
-        current_method=None,
-        expires_at=datetime.utcnow() + timedelta(minutes=2),
-    )
-    db.add(session)
-    db.commit()
-    db.refresh(session)
-
-    return UnlockSessionResponse(
-        id=session.id,
-        user_id=session.user_id,
-        status=session.status,
-        auth_methods=method_list,
-        current_method=session.current_method,
-        created_at=session.created_at,
-        expires_at=session.expires_at,
-        completed_at=session.completed_at,
-    )
-
-
-@router.get("/unlock/{session_id}", response_model=UnlockSessionResponse)
-def get_unlock_session(
-    session_id: str,
-    db: Session = Depends(get_db),
-):
-    """Poll endpoint — both web app and ESP32 use this to check session status."""
-    session = db.query(UnlockSession).filter(UnlockSession.id == session_id).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    # Auto-expire
-    if session.status == UnlockSessionStatus.pending and datetime.utcnow() > session.expires_at:
-        session.status = UnlockSessionStatus.expired
-        db.commit()
-
-    return UnlockSessionResponse(
-        id=session.id,
-        user_id=session.user_id,
-        status=session.status,
-        auth_methods=json.loads(session.auth_methods),
-        current_method=session.current_method,
-        created_at=session.created_at,
-        expires_at=session.expires_at,
-        completed_at=session.completed_at,
-    )
-
-
-@router.patch("/unlock/{session_id}", response_model=UnlockSessionResponse)
-def update_unlock_session(
-    session_id: str,
-    update: UnlockSessionUpdate,
-    db: Session = Depends(get_db),
-):
-    """
-    ESP32 calls this to update session status as it progresses:
-    pending → authenticating → success/failed
-    """
-    session = db.query(UnlockSession).filter(UnlockSession.id == session_id).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    session.status = update.status
-    if update.current_method:
-        session.current_method = update.current_method
-
-    if update.status in (UnlockSessionStatus.success, UnlockSessionStatus.failed):
-        session.completed_at = datetime.utcnow()
-        # Log the result
-        log = AccessLog(
-            user_id=session.user_id,
-            house_id=session.house_id,
-            action="door_access",
-            method=session.current_method or "web_unlock",
-            result=LogResult.success if update.status == UnlockSessionStatus.success else LogResult.failed,
-            category="access",
-        )
-        db.add(log)
-
-    db.commit()
-    db.refresh(session)
-
-    return UnlockSessionResponse(
-        id=session.id,
-        user_id=session.user_id,
-        status=session.status,
-        auth_methods=json.loads(session.auth_methods),
-        current_method=session.current_method,
-        created_at=session.created_at,
-        expires_at=session.expires_at,
-        completed_at=session.completed_at,
-    )
-
-
-@router.post("/unlock/{session_id}/cancel")
-def cancel_unlock_session(
-    session_id: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-):
-    """User cancels an in-progress unlock request."""
-    session = db.query(UnlockSession).filter(
-        UnlockSession.id == session_id,
-        UnlockSession.user_id == current_user.id,
-    ).first()
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    session.status = UnlockSessionStatus.cancelled
-    session.completed_at = datetime.utcnow()
-    db.commit()
-    return {"message": "Unlock session cancelled"}
-
-
-@router.get("/unlock/pending/next")
-def get_next_pending_session(db: Session = Depends(get_db)):
-    """
-    ESP32 polls this to check if there's an unlock request waiting.
-    Returns the oldest pending session or 204 if none.
-    """
-    session = (
-        db.query(UnlockSession)
-        .filter(
-            UnlockSession.status == UnlockSessionStatus.pending,
-            UnlockSession.expires_at > datetime.utcnow(),
-        )
-        .order_by(UnlockSession.created_at)
-        .first()
-    )
-
-    if not session:
-        return {"status": "none"}
-
-    user = db.query(User).filter(User.id == session.user_id).first()
-    return {
-        "status": "pending",
-        "session_id": session.id,
-        "user_name": user.full_name if user else "Unknown",
-        "auth_methods": json.loads(session.auth_methods),
-    }
-
-
-# ─── Direct ESP32 Auth (sensor-initiated) ───────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Device Registration Endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/device/register_check")
 def device_register_check(db: Session = Depends(get_db)):
     """
-    RFID registration trigger endpoint.
+    ESP32 polls this to check if there are pending registration requests.
+    Returns flags for fingerprint and RFID registration.
     """
-    pending_rfid = (
-        db.query(RFIDRegistrationRequest)
-        .filter(RFIDRegistrationRequest.status == FingerprintRegistrationStatus.pending)
-        .order_by(RFIDRegistrationRequest.requested_at)
+    pending_fingerprint = (
+        db.query(RegistrationRequest)
+        .filter(
+            RegistrationRequest.credential_type == CredentialType.fingerprint,
+            RegistrationRequest.status == RegistrationStatus.pending,
+        )
+        .order_by(RegistrationRequest.requested_at)
         .first()
     )
 
-    return {"register_rfid": bool(pending_rfid)}
+    pending_rfid = (
+        db.query(RegistrationRequest)
+        .filter(
+            RegistrationRequest.credential_type == CredentialType.rfid,
+            RegistrationRequest.status == RegistrationStatus.pending,
+        )
+        .order_by(RegistrationRequest.requested_at)
+        .first()
+    )
+
+    return {
+        "register_fingerprint": bool(pending_fingerprint),
+        "fingerprint_id": int(pending_fingerprint.extra_data) if pending_fingerprint and pending_fingerprint.extra_data else None,
+        "register_rfid": bool(pending_rfid),
+    }
 
 
 @router.post("/device/register_complete", response_model=DeviceRegisterCompleteResponse)
@@ -223,23 +83,24 @@ def device_register_complete(
     db: Session = Depends(get_db),
 ):
     """
-    ESP32 completion callback after enrolling a fingerprint template.
+    ESP32 calls this after enrolling a fingerprint template.
+    Updates the registration request and creates/updates the credential.
     """
     pending = (
-        db.query(FingerprintRegistrationRequest)
+        db.query(RegistrationRequest)
         .filter(
-            FingerprintRegistrationRequest.fingerprint_id == payload.fingerprint_id,
-            FingerprintRegistrationRequest.status == FingerprintRegistrationStatus.pending,
+            RegistrationRequest.credential_type == CredentialType.fingerprint,
+            RegistrationRequest.extra_data == str(payload.fingerprint_id),
+            RegistrationRequest.status == RegistrationStatus.pending,
         )
-        .order_by(FingerprintRegistrationRequest.requested_at)
+        .order_by(RegistrationRequest.requested_at)
         .first()
     )
+
     if not pending:
         raise HTTPException(status_code=404, detail="No pending registration found for fingerprint ID")
 
-    pending.status = (
-        FingerprintRegistrationStatus.completed if payload.success else FingerprintRegistrationStatus.failed
-    )
+    pending.status = RegistrationStatus.completed if payload.success else RegistrationStatus.failed
     pending.completed_at = datetime.utcnow()
 
     if payload.success:
@@ -259,26 +120,23 @@ def device_register_complete(
             db.add(credential)
 
         credential.credential_value = str(payload.fingerprint_id)
-        credential.data = f"fingerprint_template:{payload.fingerprint_id}"
-        credential.registered = True
         credential.registered_at = datetime.utcnow()
 
-    db.add(
-        AccessLog(
-            user_id=pending.requested_by_user_id,
-            house_id=pending.house_id,
-            action=(
-                f"Fingerprint registered (ID {payload.fingerprint_id})"
-                if payload.success
-                else f"Fingerprint registration failed (ID {payload.fingerprint_id})"
-            ),
-            method="fingerprint",
-            result=LogResult.success if payload.success else LogResult.failed,
-            category="system",
-        )
-    )
+    db.add(AccessLog(
+        user_id=pending.requested_by_user_id,
+        house_id=pending.house_id,
+        action=(
+            f"Fingerprint registered (ID {payload.fingerprint_id})"
+            if payload.success
+            else f"Fingerprint registration failed (ID {payload.fingerprint_id})"
+        ),
+        method="fingerprint",
+        result=LogResult.success if payload.success else LogResult.failed,
+        category="system",
+    ))
 
     db.commit()
+
     return DeviceRegisterCompleteResponse(
         status="success" if payload.success else "failure",
         message=(
@@ -296,13 +154,17 @@ def device_rfid_register_complete(
     db: Session = Depends(get_db),
 ):
     """
-    ESP32 completion callback after scanning an RFID tag for registration.
+    ESP32 calls this after scanning an RFID tag for registration.
     """
     normalized_tag = normalize_rfid_tag(payload.tag_uid)
+
     pending = (
-        db.query(RFIDRegistrationRequest)
-        .filter(RFIDRegistrationRequest.status == FingerprintRegistrationStatus.pending)
-        .order_by(RFIDRegistrationRequest.requested_at)
+        db.query(RegistrationRequest)
+        .filter(
+            RegistrationRequest.credential_type == CredentialType.rfid,
+            RegistrationRequest.status == RegistrationStatus.pending,
+        )
+        .order_by(RegistrationRequest.requested_at)
         .first()
     )
 
@@ -310,8 +172,8 @@ def device_rfid_register_complete(
         pending.completed_at = datetime.utcnow()
 
         if payload.success and normalized_tag:
-            pending.status = FingerprintRegistrationStatus.completed
-            pending.tag_uid = normalized_tag
+            pending.status = RegistrationStatus.completed
+            pending.extra_data = normalized_tag
 
             credential = (
                 db.query(Credential)
@@ -329,63 +191,29 @@ def device_rfid_register_complete(
                 db.add(credential)
 
             credential.credential_value = normalized_tag
-            credential.data = payload.tag_uid.strip()
-            credential.registered = True
             credential.registered_at = datetime.utcnow()
+
+            db.add(AccessLog(
+                user_id=pending.requested_by_user_id,
+                house_id=pending.house_id,
+                action=f"RFID tag registered ({normalized_tag})",
+                method="rfid",
+                result=LogResult.success,
+                category="system",
+            ))
         else:
-            # Keep "ignore" behavior for UID storage, but close the pending request.
-            pending.status = FingerprintRegistrationStatus.failed
+            pending.status = RegistrationStatus.failed
             if normalized_tag:
-                pending.tag_uid = normalized_tag
+                pending.extra_data = normalized_tag
 
         db.commit()
 
     return {"status": "stored"}
 
 
-@router.post("/auth/verify", response_model=ESPAuthResponse)
-def verify_authentication(request: AuthRequest, db: Session = Depends(get_db)):
-    method_used = request.method_used.strip().lower()
-    payload = request.payload.strip()
-
-    if method_used == "keypad":
-        valid_pin = (
-            db.query(Credential)
-            .filter(
-                Credential.type == CredentialType.keypad,
-                Credential.credential_value == payload,
-                Credential.registered == True,  # noqa: E712
-            )
-            .first()
-        )
-        if valid_pin:
-            return {"status": "success", "action": "unlock"}
-        return {"status": "failure", "action": "none"}
-
-    if method_used == "otp":
-        valid_otp = db.query(OTPCode).filter(OTPCode.code == payload).first()
-        if valid_otp and datetime.utcnow() < valid_otp.expires_at:
-            db.delete(valid_otp)
-            db.commit()
-            return {"status": "success", "action": "unlock"}
-        return {"status": "failure", "action": "none"}
-
-    if method_used == "rfid":
-        normalized_payload = normalize_rfid_tag(payload)
-        valid_rfid = (
-            db.query(Credential)
-            .filter(
-                Credential.type == CredentialType.rfid,
-                Credential.credential_value == normalized_payload,
-                Credential.registered == True,  # noqa: E712
-            )
-            .first()
-        )
-        if valid_rfid:
-            return {"status": "success", "action": "unlock"}
-        return {"status": "failure", "action": "none"}
-
-    return {"status": "failure", "action": "none"}
+# ═══════════════════════════════════════════════════════════════════════════════
+# OTP Generation
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/otp/generate", response_model=OTPResponse)
 def generate_otp(
@@ -401,20 +229,22 @@ def generate_otp(
     db_otp = OTPCode(code=new_code, expires_at=expiration_time)
     db.add(db_otp)
 
-    # Log OTP generation
-    log = AccessLog(
+    db.add(AccessLog(
         user_id=current_user.id,
         house_id=m.house_id,
         action="OTP Generated",
         method="Dashboard",
         result=LogResult.success,
         category="system",
-    )
-    db.add(log)
+    ))
     db.commit()
 
     return {"status": "success", "otp": new_code, "expires_in": "5 minutes"}
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ESP32 Status & Emergency Unlock
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/esp/status")
 def esp_status():
@@ -431,23 +261,26 @@ def emergency_unlock(
     """Admin-only emergency remote unlock."""
     m = require_admin_membership(db, current_user, x_house_id)
 
-    # Check lockdown
     house = db.query(House).filter(House.id == m.house_id).first()
     if house and house.lockdown:
         raise HTTPException(status_code=403, detail="Cannot emergency unlock during lockdown")
 
-    log = AccessLog(
+    db.add(AccessLog(
         user_id=current_user.id,
         house_id=m.house_id,
-        action="Emergency Unlock", method="admin_override", result=LogResult.success,
+        action="Emergency Unlock",
+        method="admin_override",
+        result=LogResult.success,
         category="access",
-    )
-    db.add(log)
+    ))
     db.commit()
+
     return {"status": "success", "action": "unlock"}
 
 
-# ─── Lockdown Management ────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Lockdown Management
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/house/lockdown")
 def get_lockdown_status(
@@ -480,7 +313,7 @@ def set_lockdown(
     current_user: User = Depends(get_current_active_user),
     x_house_id: Optional[str] = Depends(get_house_id_header),
 ):
-    """Toggle lockdown — primary admin only."""
+    """Toggle lockdown - primary admin only."""
     m = get_membership(db, current_user, x_house_id)
     if not m.is_primary_admin:
         raise HTTPException(status_code=403, detail="Only the primary admin can control lockdown")
@@ -501,15 +334,14 @@ def set_lockdown(
         house.lockdown_at = None
         action = "Lockdown Lifted"
 
-    log = AccessLog(
+    db.add(AccessLog(
         user_id=current_user.id,
         house_id=m.house_id,
         action=action,
         method="Dashboard",
         result=LogResult.success,
         category="system",
-    )
-    db.add(log)
+    ))
     db.commit()
 
     return {"message": action, "lockdown": house.lockdown}

@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { Nfc, Fingerprint, KeySquare, CheckCircle, XCircle, Plus, Trash2, Loader2 } from 'lucide-react';
+import { Nfc, Fingerprint, KeySquare, CheckCircle, XCircle, Plus, Trash2, Loader2, Radio } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -30,6 +30,9 @@ const Credentials = () => {
   const [formValue, setFormValue] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [isMock, setIsMock] = useState(false);
+  const [pendingRFID, setPendingRFID] = useState(false);
+  const [pendingFingerprint, setPendingFingerprint] = useState(false);
+  const pendingCheckRef = useRef<NodeJS.Timeout | null>(null);
 
   const fetchCredentials = async () => {
     try {
@@ -45,13 +48,51 @@ const Credentials = () => {
 
   useEffect(() => { fetchCredentials(); }, []);
 
+  // Poll more frequently when waiting for device registration
   useEffect(() => {
     if (isMock) return;
+
+    // Fast polling (every 2s) when pending, normal polling (4s) otherwise
+    const pollInterval = (pendingRFID || pendingFingerprint) ? 2000 : 4000;
+
     const timer = setInterval(() => {
-      fetchCredentials();
-    }, 4000);
+      fetchCredentials().then(() => {
+        // Check if the pending credential is now registered
+        const rfidCred = credentials.find(c => c.type === 'rfid');
+        const fpCred = credentials.find(c => c.type === 'fingerprint');
+
+        if (pendingRFID && rfidCred?.registered) {
+          setPendingRFID(false);
+          toast.success('RFID card registered successfully!');
+        }
+        if (pendingFingerprint && fpCred?.registered) {
+          setPendingFingerprint(false);
+          toast.success('Fingerprint registered successfully!');
+        }
+      });
+    }, pollInterval);
+
     return () => clearInterval(timer);
-  }, [isMock]);
+  }, [isMock, pendingRFID, pendingFingerprint, credentials]);
+
+  // Timeout for pending registrations (60 seconds)
+  useEffect(() => {
+    if (pendingRFID || pendingFingerprint) {
+      pendingCheckRef.current = setTimeout(() => {
+        if (pendingRFID) {
+          setPendingRFID(false);
+          toast.error('RFID registration timed out. Please try again.');
+        }
+        if (pendingFingerprint) {
+          setPendingFingerprint(false);
+          toast.error('Fingerprint registration timed out. Please try again.');
+        }
+      }, 60000);
+    }
+    return () => {
+      if (pendingCheckRef.current) clearTimeout(pendingCheckRef.current);
+    };
+  }, [pendingRFID, pendingFingerprint]);
 
   if (!isAuthenticated || !user) return <Navigate to="/signin" />;
 
@@ -85,9 +126,11 @@ const Credentials = () => {
       if (registerType === 'fingerprint') {
         const response = await credentialsApi.requestFingerprintRegistration();
         toast.success(`${response.message} Assigned ID: ${response.fingerprint_id}`);
+        setPendingFingerprint(true);
       } else if (registerType === 'rfid') {
         const response = await credentialsApi.requestRFIDRegistration();
         toast.success(response.message);
+        setPendingRFID(true);
       } else {
         await credentialsApi.register(registerType, formValue, formValue);
         toast.success(`${credentialMeta[registerType]?.label || registerType} registered successfully`);
@@ -139,16 +182,28 @@ const Credentials = () => {
                 const meta = credentialMeta[cred.type];
                 if (!meta) return null;
                 const Icon = meta.icon;
+                const isPending = (cred.type === 'rfid' && pendingRFID) || (cred.type === 'fingerprint' && pendingFingerprint);
                 return (
                   <motion.div key={cred.id} whileHover={{ y: -4 }} transition={{ duration: 0.2 }}
-                    className="glass-card rounded-xl p-6 flex flex-col items-center text-center">
-                    <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-4 ${cred.registered ? 'bg-success/10' : 'bg-destructive/10'}`}>
-                      <Icon className={`w-8 h-8 ${cred.registered ? 'text-success' : 'text-destructive'}`} />
+                    className={`glass-card rounded-xl p-6 flex flex-col items-center text-center ${isPending ? 'ring-2 ring-primary/50 ring-offset-2' : ''}`}>
+                    <div className={`w-16 h-16 rounded-2xl flex items-center justify-center mb-4 ${
+                      isPending ? 'bg-primary/10' : cred.registered ? 'bg-success/10' : 'bg-destructive/10'
+                    }`}>
+                      {isPending ? (
+                        <Radio className="w-8 h-8 text-primary animate-pulse" />
+                      ) : (
+                        <Icon className={`w-8 h-8 ${cred.registered ? 'text-success' : 'text-destructive'}`} />
+                      )}
                     </div>
                     <h3 className="text-lg font-semibold text-foreground mb-1">{meta.label}</h3>
                     <p className="text-sm text-muted-foreground mb-4">{meta.desc}</p>
                     <div className="flex items-center gap-2 mb-4">
-                      {cred.registered ? (
+                      {isPending ? (
+                        <>
+                          <Loader2 className="w-4 h-4 text-primary animate-spin" />
+                          <span className="text-sm text-primary font-medium">Waiting for ESP32...</span>
+                        </>
+                      ) : cred.registered ? (
                         <>
                           <CheckCircle className="w-4 h-4 text-success" />
                           <span className="text-sm text-success font-medium">Registered</span>
@@ -160,7 +215,20 @@ const Credentials = () => {
                         </>
                       )}
                     </div>
-                    {cred.registered ? (
+                    {isPending ? (
+                      <div className="space-y-2">
+                        <div className="text-xs text-primary animate-pulse">
+                          Scan your {cred.type === 'rfid' ? 'RFID card' : 'fingerprint'} on the device
+                        </div>
+                        <Button size="sm" variant="ghost" className="text-muted-foreground hover:bg-muted gap-1"
+                          onClick={() => {
+                            if (cred.type === 'rfid') setPendingRFID(false);
+                            if (cred.type === 'fingerprint') setPendingFingerprint(false);
+                          }}>
+                          Cancel
+                        </Button>
+                      </div>
+                    ) : cred.registered ? (
                       <div className="space-y-2">
                         <div className="text-xs text-muted-foreground">
                           Since {cred.registered_at ? new Date(cred.registered_at).toLocaleDateString() : '—'}
