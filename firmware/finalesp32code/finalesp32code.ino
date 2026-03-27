@@ -33,6 +33,9 @@ const int FP_RX_PIN = 16;
 const int FP_TX_PIN = 17;
 Adafruit_Fingerprint finger = Adafruit_Fingerprint(&fpSerial);
 
+// ---------------- BUZZER ----------------
+const int BUZZER_PIN = 4;
+
 // ---------------- KEYPAD ----------------
 const byte ROWS = 4;
 const byte COLS = 4;
@@ -62,6 +65,7 @@ bool isProcessingSession = false;
 unsigned long lastRegisterCheck = 0;
 const unsigned long REGISTER_POLL_MS = 3000;
 bool isRegisteringDevice = false; // Covers both RFID and FP
+int consecutiveFailures = 0;
 
 // ---------------- DISPLAY ----------------
 void showMessage(String l1, String l2="", String l3=""){
@@ -70,6 +74,35 @@ void showMessage(String l1, String l2="", String l3=""){
   if(l2!=""){ display.setCursor(0,24); display.println(l2); }
   if(l3!=""){ display.setCursor(0,48); display.println(l3); }
   display.display();
+}
+
+void buzzBeep(int onMs, int offMs, int count){
+  for(int i=0; i<count; i++){
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(onMs);
+    digitalWrite(BUZZER_PIN, LOW);
+    if(i < count - 1) delay(offMs);
+  }
+}
+
+void buzzStepPassed(){
+  // Short confirmation beep for each successful MFA step.
+  buzzBeep(70, 0, 1);
+}
+
+void buzzAccessGranted(){
+  // Positive pattern: two quick beeps.
+  buzzBeep(90, 80, 2);
+}
+
+void buzzAccessDenied(){
+  // Negative pattern: one longer beep.
+  buzzBeep(220, 0, 1);
+}
+
+void buzzAlertPattern(){
+  // High-priority alarm after repeated failed attempts.
+  buzzBeep(220, 120, 6);
 }
 
 String prettyMethod(String m){
@@ -544,10 +577,19 @@ void executeMFASequence(String firstPayload){
     String message = res["message"] | "";
 
     if(status=="success"){
+      consecutiveFailures = 0;
+      buzzAccessGranted();
       showMessage("ACCESS GRANTED", "", "Welcome!");
       delay(2000); break;
     }
     if(status!="authenticating"){
+      consecutiveFailures++;
+      if(consecutiveFailures >= 3){
+        buzzAlertPattern();
+        consecutiveFailures = 0;
+      } else {
+        buzzAccessDenied();
+      }
       if(message.length() > 0){
         if(message == "House is in lockdown") showMessage("ACCESS BLOCKED", "House in", "Lockdown");
         else showMessage("ACCESS DENIED", "", message);
@@ -559,6 +601,7 @@ void executeMFASequence(String firstPayload){
     
     // Step passed, show progress before next step
     if(i + 1 < mfaCount){
+      buzzStepPassed();
       showMessage("Step " + String(currentStep) + " OK", "Next:", prettyMethod(mfaOrder[i+1]));
       delay(1000);
     }
@@ -606,6 +649,9 @@ void setup(){
   display.begin(SSD1306_SWITCHCAPVCC,0x3C);
   display.setTextSize(1);
   display.setTextColor(WHITE);
+
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
 
   em18Serial.begin(9600,SERIAL_8N1,EM18_RX_PIN,-1);
   fpSerial.begin(57600, SERIAL_8N1, FP_RX_PIN, FP_TX_PIN);

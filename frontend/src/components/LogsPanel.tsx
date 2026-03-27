@@ -128,8 +128,8 @@ const LogsPanel = ({ userOnly, userId }: LogsPanelProps) => {
                   </div>
                 </div>
                 <div className="flex items-center gap-3 flex-shrink-0">
-                  {/* Only show result badge for unlock logs */}
-                  {(log.category === 'unlock' || (!log.category && log.result !== 'success')) && (
+                  {/* Always show alert badge; show status badge for unlock logs too */}
+                  {(log.result === 'alert' || log.category === 'unlock' || (!log.category && log.result !== 'success')) && (
                     <Badge variant="outline" className={resultColor(log.result)}>
                       {log.result}
                     </Badge>

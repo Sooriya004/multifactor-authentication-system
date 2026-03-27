@@ -68,6 +68,10 @@ ACTIVE_AUTH_ORDER = ["rfid", "keypad"]
 # Maps session_id -> {"user_id": str|None, "house_id": str|None, "last_verified_step": int, "created_at": datetime}
 ACTIVE_SESSIONS: Dict[str, Dict[str, object]] = {}
 
+# In-memory failed-attempt streak per house for security alerts.
+FAILED_STREAK_BY_HOUSE: Dict[str, int] = {}
+FAILED_ALERT_THRESHOLD = 3
+
 # Session timeout in seconds (5 minutes)
 SESSION_TIMEOUT_SECONDS = 300
 
@@ -222,6 +226,24 @@ def _verify_otp(db: Session, payload: str) -> bool:
     return True
 
 
+def _register_failed_attempt_alert_if_needed(db: Session, house_id: str) -> None:
+    """Raise a security alert log if failed unlock attempts hit threshold."""
+    streak = FAILED_STREAK_BY_HOUSE.get(house_id, 0) + 1
+    FAILED_STREAK_BY_HOUSE[house_id] = streak
+
+    if streak >= FAILED_ALERT_THRESHOLD:
+        db.add(AccessLog(
+            user_id="system",
+            house_id=house_id,
+            action=f"Security Alert: {FAILED_ALERT_THRESHOLD} consecutive failed unlock attempts",
+            method="security_monitor",
+            result=LogResult.alert,
+            category="system",
+        ))
+        # Reset so we alert once per streak sequence.
+        FAILED_STREAK_BY_HOUSE[house_id] = 0
+
+
 def _add_access_log(
     db: Session,
     user_id: Optional[str],
@@ -241,6 +263,12 @@ def _add_access_log(
         category="unlock",
     )
     db.add(log)
+
+    if house_id:
+        if status == "success":
+            FAILED_STREAK_BY_HOUSE[house_id] = 0
+        elif status == "failure":
+            _register_failed_attempt_alert_if_needed(db, house_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
