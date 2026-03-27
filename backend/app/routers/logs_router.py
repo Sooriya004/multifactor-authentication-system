@@ -3,9 +3,9 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 
 from ..database import get_db
-from ..models import User, HouseMembership, AccessLog, LogResult
+from ..models import User, AccessLog, LogResult
 from ..schemas import AccessLogResponse, AccessLogCreate
-from ..auth import get_current_active_user, get_house_id_header, get_membership, require_admin_membership
+from ..auth import get_current_active_user, get_house_id_header, get_membership
 
 router = APIRouter(prefix="/logs", tags=["Access Logs"])
 

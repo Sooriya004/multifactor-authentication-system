@@ -300,9 +300,6 @@ export const espApi = {
 
   getStatus: () => apiFetch<ApiESPStatus>('/api/esp/status'),
 
-  emergencyUnlock: () =>
-    apiFetch<{ status: string; action: string }>('/api/esp/emergency-unlock', { method: 'POST' }),
-
   getLockdownStatus: () =>
     apiFetch<{ lockdown: boolean; lockdown_by: string | null; lockdown_at: string | null }>('/api/house/lockdown'),
 

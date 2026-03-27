@@ -5,9 +5,13 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { useLockdown } from '@/lib/lockdownContext';
 import { toast } from 'sonner';
 
-const EmergencyLock = () => {
+interface EmergencyLockProps {
+  canToggleLockdown: boolean;
+}
+
+const EmergencyLock = ({ canToggleLockdown }: EmergencyLockProps) => {
   const { isLockdown, lockdownAt, toggleLockdown } = useLockdown();
-  const [showConfirm, setShowConfirm] = useState(false);
+  const [showLockConfirm, setShowLockConfirm] = useState(false);
   const [loading, setLoading] = useState(false);
 
   const handleToggle = async () => {
@@ -19,7 +23,7 @@ const EmergencyLock = () => {
       toast.error('Failed to toggle lockdown');
     } finally {
       setLoading(false);
-      setShowConfirm(false);
+      setShowLockConfirm(false);
     }
   };
 
@@ -31,29 +35,41 @@ const EmergencyLock = () => {
             <ShieldAlert className={`w-5 h-5 ${isLockdown ? 'text-destructive' : 'text-destructive/60'}`} />
           </div>
           <div>
-            <h3 className="text-sm font-semibold text-foreground">Emergency Lock</h3>
+            <h3 className="text-sm font-semibold text-foreground">Emergency Control</h3>
             <p className="text-xs text-muted-foreground">
               {isLockdown
                 ? `Lockdown active since ${lockdownAt ? new Date(lockdownAt).toLocaleString() : 'now'}`
-                : 'Lock the house — blocks all access'}
+                : 'Lockdown controls for emergency access blocking'}
             </p>
           </div>
         </div>
 
-        {isLockdown ? (
-          <Button onClick={() => setShowConfirm(true)} variant="outline"
-            className="w-full border-success/30 text-success hover:bg-success/10 gap-2">
-            <Unlock className="w-4 h-4" /> Lift Lockdown
-          </Button>
+        {canToggleLockdown ? (
+          isLockdown ? (
+            <Button
+              onClick={() => setShowLockConfirm(true)}
+              variant="outline"
+              className="w-full border-success/30 text-success hover:bg-success/10 gap-2"
+            >
+              <Unlock className="w-4 h-4" /> Lift Lockdown
+            </Button>
+          ) : (
+            <Button
+              onClick={() => setShowLockConfirm(true)}
+              variant="outline"
+              className="w-full border-destructive/30 text-destructive hover:bg-destructive/10 gap-2"
+            >
+              <Lock className="w-4 h-4" /> Activate Lockdown
+            </Button>
+          )
         ) : (
-          <Button onClick={() => setShowConfirm(true)} variant="outline"
-            className="w-full border-destructive/30 text-destructive hover:bg-destructive/10 gap-2">
-            <Lock className="w-4 h-4" /> Activate Lockdown
-          </Button>
+          <p className="text-xs text-muted-foreground text-center py-1">
+            Only the primary admin can toggle lockdown.
+          </p>
         )}
       </div>
 
-      <Dialog open={showConfirm} onOpenChange={setShowConfirm}>
+      <Dialog open={showLockConfirm} onOpenChange={setShowLockConfirm}>
         <DialogContent className="bg-card border-border">
           <DialogHeader>
             <DialogTitle className="text-foreground flex items-center gap-2">
@@ -80,7 +96,7 @@ const EmergencyLock = () => {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setShowConfirm(false)}>Cancel</Button>
+            <Button variant="ghost" onClick={() => setShowLockConfirm(false)}>Cancel</Button>
             <Button onClick={handleToggle} disabled={loading}
               className={isLockdown ? 'bg-success text-success-foreground hover:bg-success/90' : 'bg-destructive text-destructive-foreground hover:bg-destructive/90'}>
               {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}

@@ -30,7 +30,7 @@ from ..schemas import (
     FingerprintRegisterStartResponse,
     RFIDRegisterStartResponse,
 )
-from ..auth import get_current_active_user, get_house_id_header, get_membership
+from ..auth import get_current_active_user, get_house_id_header, get_membership, require_admin_membership
 from ..credential_utils import normalize_rfid_tag
 
 router = APIRouter(prefix="/credentials", tags=["Credentials & Auth Methods"])
@@ -310,8 +310,9 @@ async def get_auth_methods(
     current_user: User = Depends(get_current_active_user),
     x_house_id: Optional[str] = Depends(get_house_id_header),
 ):
-    """Get auth method settings for the current user."""
-    mid = _get_membership_id(db, current_user, x_house_id)
+    """Get auth method settings for the active house (admin only)."""
+    m = require_admin_membership(db, current_user, x_house_id)
+    mid = m.id
     _ensure_all_credential_types(db, mid)
 
     credentials = (
@@ -341,8 +342,9 @@ async def update_auth_methods(
     current_user: User = Depends(get_current_active_user),
     x_house_id: Optional[str] = Depends(get_house_id_header),
 ):
-    """Update auth method settings (enabled/priority)."""
-    mid = _get_membership_id(db, current_user, x_house_id)
+    """Update auth method settings (enabled/priority) for active house (admin only)."""
+    m = require_admin_membership(db, current_user, x_house_id)
+    mid = m.id
     _ensure_all_credential_types(db, mid)
 
     credentials = db.query(Credential).filter(Credential.membership_id == mid).all()

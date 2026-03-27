@@ -6,7 +6,6 @@ Endpoints for:
 - OTP generation
 - ESP32 status/health checks
 - Lockdown management
-- Emergency unlock
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -22,7 +21,6 @@ from ..models import (
     OTPCode,
     User,
     House,
-    HouseMembership,
     CredentialType,
     LogResult,
     RegistrationRequest,
@@ -243,39 +241,13 @@ def generate_otp(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ESP32 Status & Emergency Unlock
+# ESP32 Status
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/esp/status")
 def esp_status():
     """Health check for ESP32 connectivity."""
     return {"status": "online", "message": "FortiNest ESP32 API is running"}
-
-
-@router.post("/esp/emergency-unlock")
-def emergency_unlock(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
-    x_house_id: Optional[str] = Depends(get_house_id_header),
-):
-    """Admin-only emergency remote unlock."""
-    m = require_admin_membership(db, current_user, x_house_id)
-
-    house = db.query(House).filter(House.id == m.house_id).first()
-    if house and house.lockdown:
-        raise HTTPException(status_code=403, detail="Cannot emergency unlock during lockdown")
-
-    db.add(AccessLog(
-        user_id=current_user.id,
-        house_id=m.house_id,
-        action="Emergency Unlock",
-        method="admin_override",
-        result=LogResult.success,
-        category="access",
-    ))
-    db.commit()
-
-    return {"status": "success", "action": "unlock"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

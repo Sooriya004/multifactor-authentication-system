@@ -60,8 +60,7 @@ const LogsPanel = ({ userOnly, userId }: LogsPanelProps) => {
         const q = searchQuery.toLowerCase();
         filtered = filtered.filter(l =>
           l.action.toLowerCase().includes(q) ||
-          l.userName.toLowerCase().includes(q) ||
-          l.method.toLowerCase().includes(q)
+          l.userName.toLowerCase().includes(q)
         );
       }
       const paginated = filtered.slice((page - 1) * ITEMS_PER_PAGE, page * ITEMS_PER_PAGE);
@@ -124,7 +123,7 @@ const LogsPanel = ({ userOnly, userId }: LogsPanelProps) => {
                   <div className="min-w-0">
                     <div className="text-sm font-medium text-foreground truncate">{log.action}</div>
                     <div className="text-xs text-muted-foreground">
-                      {log.user_name}{log.method ? ` · ${log.method}` : ''}
+                      {log.user_name}
                     </div>
                   </div>
                 </div>
@@ -176,7 +175,7 @@ const LogsPanel = ({ userOnly, userId }: LogsPanelProps) => {
       <div className="relative mb-4">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
         <Input
-          placeholder="Search by action, user, or method..."
+          placeholder="Search by action or user..."
           value={searchQuery}
           onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }}
           className="pl-9 bg-secondary border-border"

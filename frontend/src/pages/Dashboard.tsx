@@ -6,9 +6,7 @@ import { useHouse } from '@/lib/houseContext';
 import Navbar from '@/components/Navbar';
 import LogsPanel from '@/components/LogsPanel';
 import UserManagement from '@/components/UserManagement';
-import UnlockDoor from '@/components/UnlockDoor';
 import ESPStatus from '@/components/ESPStatus';
-import EmergencyUnlock from '@/components/EmergencyUnlock';
 import EmergencyLock from '@/components/EmergencyLock';
 import SelfBlockButton from '@/components/SelfBlockButton';
 import OTPPanel from '@/components/OTPPanel';
@@ -66,17 +64,14 @@ const Dashboard = () => {
 
           {/* Action widgets */}
           {isAdmin ? (
-            <div className={`grid gap-4 mb-8 ${isPrimaryAdmin ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
+            <div className="grid gap-4 mb-8 md:grid-cols-3">
               <ESPStatus />
-              <UnlockDoor />
               <OTPPanel />
-              <EmergencyUnlock />
-              {isPrimaryAdmin && <EmergencyLock />}
+              <EmergencyLock canToggleLockdown={isPrimaryAdmin} />
             </div>
           ) : (
-            <div className="grid md:grid-cols-2 gap-4 mb-8">
+            <div className="grid md:grid-cols-1 gap-4 mb-8">
               <ESPStatus />
-              <UnlockDoor />
             </div>
           )}
 

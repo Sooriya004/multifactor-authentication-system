@@ -19,6 +19,7 @@ from .models import (
     OTPCode,
     AccessLog,
     LogResult,
+    House,
     HouseMembership,
     UserStatus,
 )
@@ -64,7 +65,7 @@ ACTIVE_AUTH_ORDER = ["rfid", "keypad"]
 
 
 # In-memory session store for multi-stage authentication.
-# Maps session_id -> {"user_id": str, "last_verified_step": int, "created_at": datetime}
+# Maps session_id -> {"user_id": str|None, "house_id": str|None, "last_verified_step": int, "created_at": datetime}
 ACTIVE_SESSIONS: Dict[str, Dict[str, object]] = {}
 
 # Session timeout in seconds (5 minutes)
@@ -92,6 +93,7 @@ class VerifyResponse(BaseModel):
     """Response for POST /api/auth/verify"""
     status: str  # "success", "failure", or "authenticating"
     session_id: Optional[str] = None
+    message: Optional[str] = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -158,10 +160,10 @@ def _clean_expired_sessions() -> None:
         ACTIVE_SESSIONS.pop(sid, None)
 
 
-def _find_user_id_by_credential(db: Session, method_used: str, payload: str) -> Optional[str]:
+def _find_user_id_by_credential(db: Session, method_used: str, payload: str) -> Optional[tuple[str, str]]:
     """
     Find the user_id associated with a credential.
-    Returns the user_id if found and valid, otherwise None.
+    Returns (user_id, house_id) if found and valid, otherwise None.
     """
     try:
         cred_type = CredentialType(method_used)
@@ -175,7 +177,7 @@ def _find_user_id_by_credential(db: Session, method_used: str, payload: str) -> 
     # Query the Credential table joined with HouseMembership to get user_id
     # Note: `registered` is now a property, so we check credential_value is not null
     result = (
-        db.query(Credential, HouseMembership.user_id)
+        db.query(Credential, HouseMembership.user_id, HouseMembership.house_id)
         .join(HouseMembership, Credential.membership_id == HouseMembership.id)
         .filter(
             Credential.type == cred_type,
@@ -187,8 +189,16 @@ def _find_user_id_by_credential(db: Session, method_used: str, payload: str) -> 
     )
 
     if result:
-        return str(result[1])
+        return str(result[1]), str(result[2])
     return None
+
+
+def _is_house_locked(db: Session, house_id: Optional[str]) -> bool:
+    """Check whether a house is currently in lockdown mode."""
+    if not house_id:
+        return False
+    house = db.query(House).filter(House.id == house_id).first()
+    return bool(house and house.lockdown)
 
 
 def _verify_otp(db: Session, payload: str) -> bool:
@@ -215,16 +225,20 @@ def _verify_otp(db: Session, payload: str) -> bool:
 def _add_access_log(
     db: Session,
     user_id: Optional[str],
+    house_id: Optional[str],
     method_used: str,
     status: str,
+    action: Optional[str] = None,
 ) -> None:
     """Add an entry to the access log."""
+    resolved_action = action or ("Door Unlocked" if status == "success" else "Door Unlock Failed")
     log = AccessLog(
         user_id=user_id or "unknown",
-        action="door_access",
+        house_id=house_id,
+        action=resolved_action,
         method=method_used,
         result=LogResult.success if status == "success" else LogResult.failed,
-        category="access",
+        category="unlock",
     )
     db.add(log)
 
@@ -290,20 +304,20 @@ def verify_auth(request: VerifyRequest, db: Session = Depends(get_db)):
     # Validate method
     allowed_methods = {"rfid", "keypad", "fingerprint", "otp"}
     if method_used not in allowed_methods:
-        _add_access_log(db, None, method_used, "failure")
+        _add_access_log(db, None, None, method_used, "failure")
         db.commit()
         return VerifyResponse(status="failure")
 
     # Validate step number
     if request.step < 1 or request.step > total_steps:
-        _add_access_log(db, None, method_used, "failure")
+        _add_access_log(db, None, None, method_used, "failure")
         db.commit()
         return VerifyResponse(status="failure")
 
     # Validate that the method matches the expected method for this step
     expected_method = order[request.step - 1]
     if method_used != expected_method:
-        _add_access_log(db, None, method_used, "failure")
+        _add_access_log(db, None, None, method_used, "failure")
         db.commit()
         return VerifyResponse(status="failure")
 
@@ -313,7 +327,7 @@ def verify_auth(request: VerifyRequest, db: Session = Depends(get_db)):
         if method_used == "otp":
             if _verify_otp(db, payload):
                 if total_steps == 1:
-                    _add_access_log(db, None, method_used, "success")
+                    _add_access_log(db, None, None, method_used, "success")
                     db.commit()
                     return VerifyResponse(status="success")
                 else:
@@ -321,26 +335,41 @@ def verify_auth(request: VerifyRequest, db: Session = Depends(get_db)):
                     session_id = str(uuid4())
                     ACTIVE_SESSIONS[session_id] = {
                         "user_id": None,  # OTP doesn't bind to a specific user
+                        "house_id": None,
                         "last_verified_step": 1,
                         "created_at": datetime.utcnow(),
                     }
                     db.commit()
                     return VerifyResponse(status="authenticating", session_id=session_id)
             else:
-                _add_access_log(db, None, method_used, "failure")
+                _add_access_log(db, None, None, method_used, "failure")
                 db.commit()
                 return VerifyResponse(status="failure")
 
         # Credential-based verification (RFID, keypad, fingerprint)
-        user_id = _find_user_id_by_credential(db, method_used, payload)
-        if not user_id:
-            _add_access_log(db, None, method_used, "failure")
+        matched = _find_user_id_by_credential(db, method_used, payload)
+        if not matched:
+            _add_access_log(db, None, None, method_used, "failure")
             db.commit()
             return VerifyResponse(status="failure")
 
+        user_id, house_id = matched
+
+        if _is_house_locked(db, house_id):
+            _add_access_log(
+                db,
+                user_id,
+                house_id,
+                method_used,
+                "failure",
+                action="Door Unlock Blocked (Lockdown)",
+            )
+            db.commit()
+            return VerifyResponse(status="failure", message="House is in lockdown")
+
         # Single-step mode: immediate success
         if total_steps == 1:
-            _add_access_log(db, user_id, method_used, "success")
+            _add_access_log(db, user_id, house_id, method_used, "success")
             db.commit()
             return VerifyResponse(status="success")
 
@@ -348,6 +377,7 @@ def verify_auth(request: VerifyRequest, db: Session = Depends(get_db)):
         session_id = str(uuid4())
         ACTIVE_SESSIONS[session_id] = {
             "user_id": user_id,
+            "house_id": house_id,
             "last_verified_step": 1,
             "created_at": datetime.utcnow(),
         }
@@ -357,44 +387,76 @@ def verify_auth(request: VerifyRequest, db: Session = Depends(get_db)):
     # ─── STEP 2+ ────────────────────────────────────────────────────────────
     # Require session_id for subsequent steps
     if not request.session_id:
-        _add_access_log(db, None, method_used, "failure")
+        _add_access_log(db, None, None, method_used, "failure")
         db.commit()
         return VerifyResponse(status="failure")
 
     session_data = ACTIVE_SESSIONS.get(request.session_id)
     if not session_data:
-        _add_access_log(db, None, method_used, "failure")
+        _add_access_log(db, None, None, method_used, "failure")
         db.commit()
         return VerifyResponse(status="failure")
 
     # Validate step sequence
     last_verified_step = int(session_data["last_verified_step"])
     if request.step != last_verified_step + 1:
-        _add_access_log(db, str(session_data.get("user_id")), method_used, "failure")
+        _add_access_log(db, str(session_data.get("user_id")) if session_data.get("user_id") else None, str(session_data.get("house_id")) if session_data.get("house_id") else None, method_used, "failure")
         db.commit()
         return VerifyResponse(status="failure")
 
     session_user_id = session_data.get("user_id")
+    session_house_id = session_data.get("house_id")
+
+    if _is_house_locked(db, str(session_house_id) if session_house_id else None):
+        _add_access_log(
+            db,
+            str(session_user_id) if session_user_id else None,
+            str(session_house_id) if session_house_id else None,
+            method_used,
+            "failure",
+            action="Door Unlock Blocked (Lockdown)",
+        )
+        db.commit()
+        return VerifyResponse(status="failure", message="House is in lockdown")
 
     # OTP verification (step 2+)
     if method_used == "otp":
         if not _verify_otp(db, payload):
-            _add_access_log(db, str(session_user_id) if session_user_id else None, method_used, "failure")
+            _add_access_log(db, str(session_user_id) if session_user_id else None, str(session_house_id) if session_house_id else None, method_used, "failure")
             db.commit()
             return VerifyResponse(status="failure")
         verified_user_id = session_user_id
+        verified_house_id = session_house_id
     else:
         # Credential-based verification
-        verified_user_id = _find_user_id_by_credential(db, method_used, payload)
-
-        # For non-OTP methods, verify same user if session has a user
-        if session_user_id and verified_user_id and verified_user_id != str(session_user_id):
-            _add_access_log(db, str(session_user_id), method_used, "failure")
+        matched = _find_user_id_by_credential(db, method_used, payload)
+        if not matched:
+            _add_access_log(db, str(session_user_id) if session_user_id else None, str(session_house_id) if session_house_id else None, method_used, "failure")
             db.commit()
             return VerifyResponse(status="failure")
 
-        if not verified_user_id:
-            _add_access_log(db, str(session_user_id) if session_user_id else None, method_used, "failure")
+        verified_user_id, verified_house_id = matched
+
+        if _is_house_locked(db, str(verified_house_id) if verified_house_id else None):
+            _add_access_log(
+                db,
+                str(verified_user_id) if verified_user_id else None,
+                str(verified_house_id) if verified_house_id else None,
+                method_used,
+                "failure",
+                action="Door Unlock Blocked (Lockdown)",
+            )
+            db.commit()
+            return VerifyResponse(status="failure", message="House is in lockdown")
+
+        # For non-OTP methods, verify same user if session has a user
+        if session_user_id and verified_user_id and str(verified_user_id) != str(session_user_id):
+            _add_access_log(db, str(session_user_id), str(session_house_id) if session_house_id else None, method_used, "failure")
+            db.commit()
+            return VerifyResponse(status="failure")
+
+        if session_house_id and verified_house_id and str(verified_house_id) != str(session_house_id):
+            _add_access_log(db, str(session_user_id) if session_user_id else None, str(session_house_id), method_used, "failure")
             db.commit()
             return VerifyResponse(status="failure")
 
@@ -402,7 +464,13 @@ def verify_auth(request: VerifyRequest, db: Session = Depends(get_db)):
     if request.step == total_steps:
         # Clear the session
         ACTIVE_SESSIONS.pop(request.session_id, None)
-        _add_access_log(db, str(verified_user_id) if verified_user_id else str(session_user_id), method_used, "success")
+        _add_access_log(
+            db,
+            str(verified_user_id) if verified_user_id else (str(session_user_id) if session_user_id else None),
+            str(verified_house_id) if verified_house_id else (str(session_house_id) if session_house_id else None),
+            method_used,
+            "success",
+        )
         db.commit()
         return VerifyResponse(status="success")
 
@@ -410,5 +478,7 @@ def verify_auth(request: VerifyRequest, db: Session = Depends(get_db)):
     session_data["last_verified_step"] = request.step
     if verified_user_id:
         session_data["user_id"] = verified_user_id
+    if verified_house_id:
+        session_data["house_id"] = verified_house_id
     db.commit()
     return VerifyResponse(status="authenticating", session_id=request.session_id)

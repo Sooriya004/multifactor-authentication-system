@@ -541,13 +541,19 @@ void executeMFASequence(String firstPayload){
 
     if(res.containsKey("session_id")) sessionId = String(res["session_id"]);
     String status = res["status"] | "";
+    String message = res["message"] | "";
 
     if(status=="success"){
       showMessage("ACCESS GRANTED", "", "Welcome!");
       delay(2000); break;
     }
     if(status!="authenticating"){
-      showMessage("ACCESS DENIED", "", "Invalid credential");
+      if(message.length() > 0){
+        if(message == "House is in lockdown") showMessage("ACCESS BLOCKED", "House in", "Lockdown");
+        else showMessage("ACCESS DENIED", "", message);
+      } else {
+        showMessage("ACCESS DENIED", "", "Invalid credential");
+      }
       delay(1500); break;
     }
     

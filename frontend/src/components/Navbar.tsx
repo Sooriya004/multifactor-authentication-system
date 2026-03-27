@@ -8,12 +8,6 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Button } from '@/components/ui/button';
 import HouseManager from '@/components/HouseManager';
 
-const navItems = [
-  { to: '/dashboard', icon: ScrollText, label: 'Logs' },
-  { to: '/credentials', icon: KeyRound, label: 'Register Credentials' },
-  { to: '/auth-settings', icon: Settings, label: 'Auth Settings' },
-];
-
 const Navbar = () => {
   const { user, logout } = useAuth();
   const { houses, activeHouse, setActiveHouse } = useHouse();
@@ -27,6 +21,13 @@ const Navbar = () => {
     setActiveHouse(house);
     setActiveHouseId(house.id);
   };
+
+  const isAdmin = (activeHouse?.role || user?.role) === 'admin';
+  const navItems = [
+    { to: '/dashboard', icon: ScrollText, label: 'Logs' },
+    { to: '/credentials', icon: KeyRound, label: 'Register Credentials' },
+    ...(isAdmin ? [{ to: '/auth-settings', icon: Settings, label: 'Auth Settings' }] : []),
+  ];
 
   const roleEmoji = activeHouse?.isPrimaryAdmin ? '👑' : activeHouse?.role === 'admin' ? '🛡️' : '👤';
   const roleLabel = activeHouse?.isPrimaryAdmin ? 'Primary Admin' : activeHouse?.role === 'admin' ? 'Admin' : 'Member';

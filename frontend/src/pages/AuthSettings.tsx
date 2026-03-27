@@ -4,6 +4,7 @@ import { Nfc, Fingerprint, KeySquare, Smartphone, GripVertical, Info, Link as Li
 import { Switch } from '@/components/ui/switch';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useAuth } from '@/lib/authContext';
+import { useHouse } from '@/lib/houseContext';
 import { credentialsApi, type ApiAuthMethod } from '@/lib/api';
 import { mockAuthMethods } from '@/lib/mockData';
 import Navbar from '@/components/Navbar';
@@ -23,6 +24,7 @@ function toApiMethod(m: typeof mockAuthMethods[0]): ApiAuthMethod {
 
 const AuthSettings = () => {
   const { user, isAuthenticated } = useAuth();
+  const { activeHouse } = useHouse();
   const [methods, setMethods] = useState<ApiAuthMethod[]>([]);
   const [loading, setLoading] = useState(true);
   const [isMock, setIsMock] = useState(false);
@@ -42,6 +44,7 @@ const AuthSettings = () => {
   useEffect(() => { fetchMethods(); }, []);
 
   if (!isAuthenticated || !user) return <Navigate to="/signin" />;
+  if ((activeHouse?.role || user.role) !== 'admin') return <Navigate to="/dashboard" />;
 
   const toggleMethod = async (id: string) => {
     const method = methods.find(m => m.id === id);
