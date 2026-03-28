@@ -4,7 +4,7 @@ Supports configurable single-method or multi-stage sequential MFA for ESP32 devi
 """
 
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -22,8 +22,11 @@ from .models import (
     House,
     HouseMembership,
     UserStatus,
+    User,
+    get_ist_now,
 )
 from .credential_utils import normalize_rfid_tag
+from .email_service import send_breakin_alert
 
 # Import routers
 from .routers import auth_router, users_router, house_router, logs_router, credentials_router, esp_router
@@ -70,6 +73,8 @@ ACTIVE_SESSIONS: Dict[str, Dict[str, object]] = {}
 
 # In-memory failed-attempt streak per house for security alerts.
 FAILED_STREAK_BY_HOUSE: Dict[str, int] = {}
+# Track unknown credential attempts globally
+UNKNOWN_CREDENTIAL_FAILURES: int = 0
 FAILED_ALERT_THRESHOLD = 3
 
 # Session timeout in seconds (5 minutes)
@@ -155,7 +160,7 @@ def _normalize_method(method: str) -> str:
 
 def _clean_expired_sessions() -> None:
     """Remove expired sessions from the in-memory store."""
-    now = datetime.utcnow()
+    now = get_ist_now()
     expired = [
         sid for sid, data in ACTIVE_SESSIONS.items()
         if (now - data.get("created_at", now)).total_seconds() > SESSION_TIMEOUT_SECONDS
@@ -214,7 +219,11 @@ def _verify_otp(db: Session, payload: str) -> bool:
     if not otp:
         return False
 
-    if datetime.utcnow() >= otp.expires_at:
+    # Compare as naive datetimes to handle legacy data
+    now = get_ist_now().replace(tzinfo=None)
+    expires = otp.expires_at.replace(tzinfo=None) if otp.expires_at.tzinfo else otp.expires_at
+    
+    if now >= expires:
         # OTP expired - optionally clean it up
         db.delete(otp)
         db.commit()
@@ -226,7 +235,23 @@ def _verify_otp(db: Session, payload: str) -> bool:
     return True
 
 
-def _register_failed_attempt_alert_if_needed(db: Session, house_id: str) -> None:
+def _get_house_admin_emails(db: Session, house_id: str) -> List[str]:
+    """Get email addresses of all admins/owners for a house."""
+    memberships = db.query(HouseMembership).filter(
+        HouseMembership.house_id == house_id,
+        HouseMembership.role.in_(["owner", "admin"]),
+        HouseMembership.status == UserStatus.active
+    ).all()
+    
+    emails = []
+    for membership in memberships:
+        user = db.query(User).filter(User.id == membership.user_id).first()
+        if user and user.email:
+            emails.append(user.email)
+    return emails
+
+
+def _register_failed_attempt_alert_if_needed(db: Session, house_id: str, method_used: str = None) -> None:
     """Raise a security alert log if failed unlock attempts hit threshold."""
     streak = FAILED_STREAK_BY_HOUSE.get(house_id, 0) + 1
     FAILED_STREAK_BY_HOUSE[house_id] = streak
@@ -240,6 +265,18 @@ def _register_failed_attempt_alert_if_needed(db: Session, house_id: str) -> None
             result=LogResult.alert,
             category="system",
         ))
+        
+        # Send email alert to house admins
+        house = db.query(House).filter(House.id == house_id).first()
+        if house:
+            admin_emails = _get_house_admin_emails(db, house_id)
+            send_breakin_alert(
+                recipient_emails=admin_emails,
+                house_name=house.name,
+                failed_attempts=FAILED_ALERT_THRESHOLD,
+                last_method=method_used
+            )
+        
         # Reset so we alert once per streak sequence.
         FAILED_STREAK_BY_HOUSE[house_id] = 0
 
@@ -251,8 +288,11 @@ def _add_access_log(
     method_used: str,
     status: str,
     action: Optional[str] = None,
+    credential_payload: Optional[str] = None,
 ) -> None:
     """Add an entry to the access log."""
+    global UNKNOWN_CREDENTIAL_FAILURES
+    
     resolved_action = action or ("Door Unlocked" if status == "success" else "Door Unlock Failed")
     log = AccessLog(
         user_id=user_id or "unknown",
@@ -261,14 +301,52 @@ def _add_access_log(
         method=method_used,
         result=LogResult.success if status == "success" else LogResult.failed,
         category="unlock",
+        credential_payload=credential_payload[:100] if credential_payload else None,
     )
     db.add(log)
 
-    if house_id:
-        if status == "success":
+    if status == "success":
+        # Reset counters on success
+        UNKNOWN_CREDENTIAL_FAILURES = 0
+        if house_id:
             FAILED_STREAK_BY_HOUSE[house_id] = 0
-        elif status == "failure":
-            _register_failed_attempt_alert_if_needed(db, house_id)
+    elif status == "failure":
+        if house_id:
+            _register_failed_attempt_alert_if_needed(db, house_id, method_used)
+        elif credential_payload:
+            # Unknown credential - track globally and alert all admins after threshold
+            UNKNOWN_CREDENTIAL_FAILURES += 1
+            if UNKNOWN_CREDENTIAL_FAILURES >= FAILED_ALERT_THRESHOLD:
+                _register_unknown_credential_alert(db, method_used, credential_payload)
+                UNKNOWN_CREDENTIAL_FAILURES = 0
+
+
+def _register_unknown_credential_alert(db: Session, method: str, payload: str) -> None:
+    """Send alert to all system admins when unknown credentials hit threshold."""
+    # Get all house owners/admins to alert
+    all_admin_emails = set()
+    houses = db.query(House).all()
+    for house in houses:
+        admins = (
+            db.query(User)
+            .join(HouseMembership, HouseMembership.user_id == User.id)
+            .filter(
+                HouseMembership.house_id == house.id,
+                HouseMembership.role.in_(["owner", "admin"]),
+            )
+            .all()
+        )
+        for admin in admins:
+            if admin.email:
+                all_admin_emails.add(admin.email)
+    
+    if all_admin_emails:
+        send_breakin_alert(
+            list(all_admin_emails),
+            "SYSTEM (Unknown Credential)",
+            FAILED_ALERT_THRESHOLD,
+            method
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -365,19 +443,19 @@ def verify_auth(request: VerifyRequest, db: Session = Depends(get_db)):
                         "user_id": None,  # OTP doesn't bind to a specific user
                         "house_id": None,
                         "last_verified_step": 1,
-                        "created_at": datetime.utcnow(),
+                        "created_at": get_ist_now(),
                     }
                     db.commit()
                     return VerifyResponse(status="authenticating", session_id=session_id)
             else:
-                _add_access_log(db, None, None, method_used, "failure")
+                _add_access_log(db, None, None, method_used, "failure", credential_payload=payload)
                 db.commit()
                 return VerifyResponse(status="failure")
 
         # Credential-based verification (RFID, keypad, fingerprint)
         matched = _find_user_id_by_credential(db, method_used, payload)
         if not matched:
-            _add_access_log(db, None, None, method_used, "failure")
+            _add_access_log(db, None, None, method_used, "failure", credential_payload=payload)
             db.commit()
             return VerifyResponse(status="failure")
 
@@ -407,7 +485,7 @@ def verify_auth(request: VerifyRequest, db: Session = Depends(get_db)):
             "user_id": user_id,
             "house_id": house_id,
             "last_verified_step": 1,
-            "created_at": datetime.utcnow(),
+            "created_at": get_ist_now(),
         }
         db.commit()
         return VerifyResponse(status="authenticating", session_id=session_id)

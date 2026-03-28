@@ -14,7 +14,7 @@ Tables:
 
 from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Enum as SQLEnum, Integer
 from sqlalchemy.orm import relationship
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import enum
 import uuid
 
@@ -23,6 +23,14 @@ from .database import Base
 
 def generate_uuid():
     return str(uuid.uuid4())
+
+
+# IST timezone (UTC+5:30)
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def get_ist_now():
+    """Return current time in IST."""
+    return datetime.now(IST)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -80,7 +88,7 @@ class User(Base):
     address = Column(String(255), nullable=True)
     dob = Column(String(20), nullable=True)
     hashed_password = Column(String(255), nullable=False)
-    joined_at = Column(DateTime, default=datetime.utcnow)
+    joined_at = Column(DateTime, default=get_ist_now)
 
     memberships = relationship("HouseMembership", back_populates="user")
     access_logs = relationship(
@@ -98,7 +106,7 @@ class House(Base):
     name = Column(String(100), nullable=False)
     code = Column(String(20), unique=True, nullable=False, index=True)
     created_by = Column(String, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_ist_now)
     lockdown = Column(Boolean, default=False)
     lockdown_by = Column(String, ForeignKey("users.id"), nullable=True)
     lockdown_at = Column(DateTime, nullable=True)
@@ -116,7 +124,7 @@ class HouseMembership(Base):
     role = Column(SQLEnum(UserRole), default=UserRole.member)
     is_primary_admin = Column(Boolean, default=False)
     status = Column(SQLEnum(UserStatus), default=UserStatus.pending)
-    joined_at = Column(DateTime, default=datetime.utcnow)
+    joined_at = Column(DateTime, default=get_ist_now)
 
     user = relationship("User", back_populates="memberships")
     house = relationship("House", back_populates="memberships")
@@ -177,7 +185,7 @@ class RegistrationRequest(Base):
     # Type-specific data (fingerprint_id for fingerprint, tag_uid for rfid, etc.)
     extra_data = Column(String(500), nullable=True)
 
-    requested_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    requested_at = Column(DateTime, default=get_ist_now, nullable=False)
     completed_at = Column(DateTime, nullable=True)
 
     membership = relationship("HouseMembership")
@@ -196,7 +204,7 @@ class OTPCode(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     code = Column(String(10), index=True, nullable=False)
     expires_at = Column(DateTime, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=get_ist_now)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -210,13 +218,14 @@ class AccessLog(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     user_id = Column(String, nullable=False)  # User UUID or "unknown"/"system"
     house_id = Column(String, ForeignKey("houses.id"), nullable=True)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=get_ist_now)
     action = Column(String(100), nullable=False)
     method = Column(String(50), nullable=False)
-    result = Column(SQLEnum(LogResult), default=LogResult.success)
+    result = Column(SQLEnum(LogResult), default=LogResult.failed)
     category = Column(String(50), nullable=True)  # "access", "system", "account"
     ip_address = Column(String(50), nullable=True)
     device_id = Column(String(100), nullable=True)
+    credential_payload = Column(String(100), nullable=True)  # For forensics on unknown attempts
 
     user = relationship(
         "User",
@@ -237,7 +246,7 @@ class JoinRequest(Base):
     id = Column(String, primary_key=True, default=generate_uuid)
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     house_code = Column(String(20), nullable=False)
-    requested_at = Column(DateTime, default=datetime.utcnow)
+    requested_at = Column(DateTime, default=get_ist_now)
     status = Column(SQLEnum(JoinRequestStatus), default=JoinRequestStatus.pending)
     reviewed_by = Column(String, ForeignKey("users.id"), nullable=True)
     reviewed_at = Column(DateTime, nullable=True)

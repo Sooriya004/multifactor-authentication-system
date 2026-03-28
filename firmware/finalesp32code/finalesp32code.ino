@@ -54,7 +54,7 @@ Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
 // ---------------- STATE ----------------
 unsigned long lastConfigPoll = 0;
-const unsigned long CONFIG_POLL_MS = 5000;
+const unsigned long CONFIG_POLL_MS = 15000;  // Poll config every 15 seconds
 
 String mfaOrder[3] = {"keypad"};
 int mfaCount = 1;
@@ -63,7 +63,7 @@ String idleEnteredCode = "";
 bool isProcessingSession = false;
 
 unsigned long lastRegisterCheck = 0;
-const unsigned long REGISTER_POLL_MS = 3000;
+const unsigned long REGISTER_POLL_MS = 10000;  // Check registration every 10 seconds
 bool isRegisteringDevice = false; // Covers both RFID and FP
 int consecutiveFailures = 0;
 
@@ -73,6 +73,86 @@ void showMessage(String l1, String l2="", String l3=""){
   display.setCursor(0,0); display.println(l1);
   if(l2!=""){ display.setCursor(0,24); display.println(l2); }
   if(l3!=""){ display.setCursor(0,48); display.println(l3); }
+  display.display();
+}
+
+void drawCenteredText(String text, int y) {
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(text.c_str(), 0, 0, &x1, &y1, &w, &h);
+  display.setCursor((SCREEN_WIDTH - w) / 2, y);
+  display.print(text);
+}
+
+void showLoadingAnimation(String msg) {
+  // Animated loading spinner while verifying
+  static int frame = 0;
+  const char* frames[] = {"|", "/", "-", "\\"};
+  
+  display.clearDisplay();
+  display.setTextSize(1);
+  drawCenteredText(msg, 20);
+  
+  // Draw spinner
+  display.setTextSize(2);
+  display.setCursor(56, 40);
+  display.print(frames[frame % 4]);
+  display.setTextSize(1);
+  display.display();
+  frame++;
+}
+
+void showAccessGrantedAnimation() {
+  // Frame 1: Door unlock icon expanding
+  display.clearDisplay();
+  display.drawRect(54, 10, 20, 30, WHITE);
+  display.fillRect(70, 22, 6, 6, WHITE);
+  display.display();
+  delay(400);
+  
+  // Frame 2: Add checkmark
+  display.clearDisplay();
+  display.drawRect(54, 10, 20, 30, WHITE);
+  display.fillRect(70, 22, 6, 6, WHITE);
+  display.drawLine(50, 48, 58, 56, WHITE);
+  display.drawLine(58, 56, 78, 36, WHITE);
+  display.display();
+  delay(400);
+  
+  // Frame 3: Full display with text
+  display.clearDisplay();
+  
+  // Draw unlock icon
+  display.drawRect(54, 5, 20, 25, WHITE);
+  display.fillRect(70, 15, 6, 6, WHITE);
+  
+  // Draw checkmark
+  display.drawLine(50, 38, 58, 46, WHITE);
+  display.drawLine(58, 46, 78, 26, WHITE);
+  
+  display.setTextSize(1);
+  drawCenteredText("ACCESS GRANTED", 52);
+  display.display();
+}
+
+void showAccessDeniedAnimation() {
+  // Frame 1: Lock icon
+  display.clearDisplay();
+  display.drawRect(54, 15, 20, 25, WHITE);
+  display.fillRect(58, 5, 12, 15, WHITE);
+  display.fillRect(60, 7, 8, 11, BLACK);
+  display.display();
+  delay(350);
+  
+  // Frame 2: Add X mark
+  display.clearDisplay();
+  display.drawRect(54, 15, 20, 25, WHITE);
+  display.fillRect(58, 5, 12, 15, WHITE);
+  display.fillRect(60, 7, 8, 11, BLACK);
+  display.drawLine(52, 45, 76, 55, WHITE);
+  display.drawLine(52, 55, 76, 45, WHITE);
+  display.setTextSize(1);
+  drawCenteredText("ACCESS DENIED", 58);
   display.display();
 }
 
@@ -87,17 +167,21 @@ void buzzBeep(int onMs, int offMs, int count){
 
 void buzzStepPassed(){
   // Short confirmation beep for each successful MFA step.
-  buzzBeep(70, 0, 1);
+  buzzBeep(50, 0, 1);
 }
 
 void buzzAccessGranted(){
-  // Positive pattern: two quick beeps.
-  buzzBeep(90, 80, 2);
+  // Celebratory pattern: ascending tones (simulated with beeps)
+  buzzBeep(60, 60, 1);
+  delay(40);
+  buzzBeep(80, 0, 1);
+  delay(40);
+  buzzBeep(120, 0, 1);
 }
 
 void buzzAccessDenied(){
-  // Negative pattern: one longer beep.
-  buzzBeep(220, 0, 1);
+  // Negative pattern: two short warning beeps.
+  buzzBeep(150, 100, 2);
 }
 
 void buzzAlertPattern(){
@@ -120,21 +204,36 @@ void showStepHeader(int step, int total){
   display.print(step);
   display.print(" of ");
   display.println(total);
+  display.display();
 }
 
 void showHome(){
   display.clearDisplay();
-  display.setCursor(0,0);
-  display.println("MFA System Ready");
-  display.setCursor(0,24);
-  display.print("Use: ");
-  display.println(prettyMethod(mfaOrder[0]));
+  
+  // Draw decorative border
+  display.drawRect(0, 0, 128, 64, WHITE);
+  display.drawLine(0, 18, 128, 18, WHITE);
+  
+  // Header
+  display.setTextSize(1);
+  drawCenteredText("M.F.A SYSTEM", 5);
+  
+  // First method prompt
+  display.setCursor(8, 26);
+  display.print("> ");
+  display.print(prettyMethod(mfaOrder[0]));
+  
+  // Step count if multi-factor
   if(mfaCount > 1){
-    display.setCursor(0,48);
-    display.print("(");
+    display.setCursor(8, 42);
+    display.print("  (");
     display.print(mfaCount);
     display.print(" steps)");
   }
+  
+  // Status indicator
+  display.fillCircle(118, 54, 4, WHITE);
+  
   display.display();
 }
 
@@ -165,7 +264,7 @@ bool requestJSON(String method,String url,String body, DynamicJsonDocument &doc,
   
   HTTPClient http;
   http.begin(url);
-  http.setTimeout(4000);
+  http.setTimeout(2500);  // Reduced from 4000ms for better responsiveness
   if(method!="GET") http.addHeader("Content-Type","application/json");
 
   String raw;
@@ -561,11 +660,11 @@ void executeMFASequence(String firstPayload){
     String json; serializeJson(req,json);
     DynamicJsonDocument res(512); int code;
 
-    // Show verifying message
-    showStepHeader(currentStep, totalSteps);
-    display.setCursor(0,28);
-    display.println("Verifying...");
-    display.display();
+    // Show animated verifying message
+    for(int a = 0; a < 3; a++) {
+      showLoadingAnimation("Verifying...");
+      delay(100);
+    }
 
     if(!requestJSON("POST",verifyURL,json,res,code) || code!=200){
       showMessage("Network Error", "Code: " + String(code));
@@ -578,36 +677,45 @@ void executeMFASequence(String firstPayload){
 
     if(status=="success"){
       consecutiveFailures = 0;
+      showAccessGrantedAnimation();
       buzzAccessGranted();
-      showMessage("ACCESS GRANTED", "", "Welcome!");
-      delay(2000); break;
+      delay(4500); break;  // 4.5 seconds to enjoy animated success
     }
     if(status!="authenticating"){
       consecutiveFailures++;
+      showAccessDeniedAnimation();
       if(consecutiveFailures >= 3){
         buzzAlertPattern();
         consecutiveFailures = 0;
       } else {
         buzzAccessDenied();
       }
+      delay(300);
+      // Show reason below the animation
       if(message.length() > 0){
-        if(message == "House is in lockdown") showMessage("ACCESS BLOCKED", "House in", "Lockdown");
-        else showMessage("ACCESS DENIED", "", message);
-      } else {
-        showMessage("ACCESS DENIED", "", "Invalid credential");
+        display.setCursor(0, 58);
+        display.setTextSize(1);
+        if(message == "House is in lockdown") {
+          drawCenteredText("LOCKDOWN", 58);
+        }
       }
-      delay(1500); break;
+      display.display();
+      delay(3700); break;  // 4 seconds total to see failure
     }
     
     // Step passed, show progress before next step
     if(i + 1 < mfaCount){
       buzzStepPassed();
       showMessage("Step " + String(currentStep) + " OK", "Next:", prettyMethod(mfaOrder[i+1]));
-      delay(1000);
+      delay(4000);  // 4 seconds between steps for breathing room
     }
   }
 
   isProcessingSession=false;
+  
+  // Clear RFID buffer to prevent stale reads
+  while(em18Serial.available()) em18Serial.read();
+  
   showHome();
 }
 
@@ -619,26 +727,43 @@ void updateDeviceConfig(){
 
   DynamicJsonDocument res(512);
   int code;
-  if(requestJSON("GET",configURL,"",res,code) && code==200){
-    JsonArray arr = res["order"];
-    bool changed = false;
-    if(arr.size() != mfaCount) changed = true;
-    else {
-      int i = 0;
-      for(JsonVariant v: arr){
-        if(mfaOrder[i] != String(v.as<const char*>())) { changed = true; break; }
-        i++;
-      }
+  bool success = requestJSON("GET",configURL,"",res,code);
+  
+  // Diagnostic logging for config poll failures
+  if(!success) {
+    if(WiFi.status() != WL_CONNECTED) {
+      Serial.println("[CONFIG] Poll failed - WiFi disconnected (NETWORK ISSUE)");
+    } else {
+      Serial.println("[CONFIG] Poll failed - Server unreachable or timeout (NETWORK ISSUE likely)");
+      Serial.println("[CONFIG] WiFi connected, HTTP code: " + String(code));
     }
-
-    int i=0;
-    for(JsonVariant v: arr) mfaOrder[i++] = String(v.as<const char*>());
-    mfaCount = i;
-
-    if(changed){
-      Serial.println("Config changed!");
-      showHome();
+    return;
+  }
+  
+  if(code != 200) {
+    Serial.println("[CONFIG] Poll returned non-200: " + String(code) + " (SERVER ISSUE)");
+    return;
+  }
+  
+  // Successfully got config
+  JsonArray arr = res["order"];
+  bool changed = false;
+  if(arr.size() != mfaCount) changed = true;
+  else {
+    int i = 0;
+    for(JsonVariant v: arr){
+      if(mfaOrder[i] != String(v.as<const char*>())) { changed = true; break; }
+      i++;
     }
+  }
+
+  int i=0;
+  for(JsonVariant v: arr) mfaOrder[i++] = String(v.as<const char*>());
+  mfaCount = i;
+
+  if(changed){
+    Serial.println("[CONFIG] Config changed!");
+    showHome();
   }
 }
 
@@ -657,31 +782,26 @@ void setup(){
   fpSerial.begin(57600, SERIAL_8N1, FP_RX_PIN, FP_TX_PIN);
   finger.begin(57600);
 
-  display.clearDisplay(); display.setCursor(0,0);
+  // Initialize fingerprint sensor and log to Serial
+  Serial.println("[FP] Initializing fingerprint sensor...");
   if (finger.verifyPassword()) {
-    display.println("FP Sensor: OK");
+    Serial.println("[FP] Sensor: OK");
     finger.getTemplateCount();
-    Serial.println("Templates stored: " + String(finger.templateCount));
-    display.println("Templates: " + String(finger.templateCount));
-
-    // Test if template at slot 1 is valid
+    Serial.println("[FP] Templates stored: " + String(finger.templateCount));
     if (finger.templateCount > 0) {
       uint8_t p = finger.loadModel(1);
-      Serial.println("Load template 1: " + String(p));
       if (p == FINGERPRINT_OK) {
-        Serial.println("Template 1 is VALID");
+        Serial.println("[FP] Template 1: VALID");
       } else {
-        Serial.println("Template 1 load FAILED: " + String(p));
+        Serial.println("[FP] Template 1 load FAILED: " + String(p));
       }
     }
   } else {
-    display.println("FP Sensor: ERROR");
-    Serial.println("FP Sensor password verify FAILED");
+    Serial.println("[FP] Sensor: ERROR - password verify failed");
   }
-  display.display();
-  delay(2000);
 
   connectWiFi();
+  WiFi.setSleep(false);  // Disable WiFi power saving to prevent intermittent drops
   updateDeviceConfig();
   showHome();
 }

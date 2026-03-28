@@ -23,8 +23,15 @@ async def get_logs(
     m = get_membership(db, current_user, x_house_id)
     query = db.query(AccessLog)
 
-    if m.role == "admin":
-        query = query.filter(AccessLog.house_id == m.house_id)
+    if m.role in ["admin", "owner"]:
+        # Admins see their house logs AND unknown credential attempts (house_id is NULL)
+        from sqlalchemy import or_
+        query = query.filter(
+            or_(
+                AccessLog.house_id == m.house_id,
+                AccessLog.house_id == None  # Unknown credential attempts
+            )
+        )
     else:
         query = query.filter(AccessLog.user_id == current_user.id, AccessLog.house_id == m.house_id)
 

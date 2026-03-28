@@ -10,7 +10,7 @@ Endpoints for:
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional
 import random
 
@@ -25,6 +25,7 @@ from ..models import (
     LogResult,
     RegistrationRequest,
     RegistrationStatus,
+    get_ist_now,
 )
 from ..schemas import (
     OTPResponse,
@@ -99,7 +100,7 @@ def device_register_complete(
         raise HTTPException(status_code=404, detail="No pending registration found for fingerprint ID")
 
     pending.status = RegistrationStatus.completed if payload.success else RegistrationStatus.failed
-    pending.completed_at = datetime.utcnow()
+    pending.completed_at = get_ist_now()
 
     if payload.success:
         credential = (
@@ -118,7 +119,7 @@ def device_register_complete(
             db.add(credential)
 
         credential.credential_value = str(payload.fingerprint_id)
-        credential.registered_at = datetime.utcnow()
+        credential.registered_at = get_ist_now()
 
     db.add(AccessLog(
         user_id=pending.requested_by_user_id,
@@ -167,7 +168,7 @@ def device_rfid_register_complete(
     )
 
     if pending:
-        pending.completed_at = datetime.utcnow()
+        pending.completed_at = get_ist_now()
 
         if payload.success and normalized_tag:
             pending.status = RegistrationStatus.completed
@@ -189,7 +190,7 @@ def device_rfid_register_complete(
                 db.add(credential)
 
             credential.credential_value = normalized_tag
-            credential.registered_at = datetime.utcnow()
+            credential.registered_at = get_ist_now()
 
             db.add(AccessLog(
                 user_id=pending.requested_by_user_id,
@@ -223,7 +224,7 @@ def generate_otp(
     m = require_admin_membership(db, current_user, x_house_id)
 
     new_code = str(random.randint(100000, 999999))
-    expiration_time = datetime.utcnow() + timedelta(minutes=5)
+    expiration_time = get_ist_now() + timedelta(minutes=5)
     db_otp = OTPCode(code=new_code, expires_at=expiration_time)
     db.add(db_otp)
 
@@ -299,7 +300,7 @@ def set_lockdown(
 
     if active:
         house.lockdown_by = current_user.id
-        house.lockdown_at = datetime.utcnow()
+        house.lockdown_at = get_ist_now()
         action = "Lockdown Activated"
     else:
         house.lockdown_by = None
